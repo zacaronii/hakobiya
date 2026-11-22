@@ -1,0 +1,48 @@
+# An example deployment behind Traefik with Authentik forward auth. Replace hakobiya.example.com, the host paths
+# and the middleware names with your own. Secrets go in a .env next to this file, mode 600: QBIT_USERNAME,
+# QBIT_PASSWORD, HAKOBIYA_PROXY_KEY (random; Traefik adds it to every request so the app can refuse direct ones),
+# ROMM_TOKEN (RomM API token, used to start a scan after filing), SCREENSCRAPER_USER / _PASSWORD / _DEV_ID /
+# _DEV_PASSWORD (copied from RomM's settings; the weekly check for genuine Japanese disc/cart scans).
+services:
+  hakobiya:
+    image: ghcr.io/zacaronii/hakobiya:latest
+    container_name: hakobiya
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: Etc/UTC
+      QBIT_URL: http://qbittorrent:8080
+      ROMM_LIBRARY: /data/media/romm_library/roms
+      ROMM_URL: http://romm:8080
+      # Named in the answer to a request that didn't come through the proxy.
+      HAKOBIYA_PUBLIC_URL: https://hakobiya.example.com
+      # Every six hours, remove what "Check now" on the Regions page removes by itself (spines, backs, 3D boxes,
+      # marquees and title screens from other regions). Covers, discs and logos stay opt-in. Off unless set.
+      # HAKOBIYA_REGION_CHECK: "1"
+    volumes:
+      - /path/to/appdata/hakobiya:/config
+      # One mount for torrents and the library, so finished cartridge zips can be hardlinked between them.
+      # Writes: the library (new files only, never overwrites) and /data/torrents/.hakobiya-tmp (conversion scratch).
+      - /path/to/data:/data
+      # RomM's media folder: the Make tab writes generated disc/cart art to roms/<platform>/<game>/physical/.
+      - /path/to/appdata/romm/resources:/romm-resources
+    networks: [proxy]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: proxy
+      traefik.http.routers.hakobiya.rule: Host(`hakobiya.example.com`)
+      traefik.http.routers.hakobiya.entrypoints: https
+      traefik.http.routers.hakobiya.tls: "true"
+      traefik.http.routers.hakobiya.middlewares: authentik@file,hakobiya-key@docker
+      traefik.http.middlewares.hakobiya-key.headers.customrequestheaders.X-Hakobiya-Key: ${HAKOBIYA_PROXY_KEY}
+      traefik.http.services.hakobiya.loadbalancer.server.port: "8080"
+      # Authentik's sign-in endpoints on this host go to its embedded outpost.
+      traefik.http.routers.hakobiya-auth.rule: Host(`hakobiya.example.com`) && PathPrefix(`/outpost.goauthentik.io/`)
+      traefik.http.routers.hakobiya-auth.entrypoints: https
+      traefik.http.routers.hakobiya-auth.tls: "true"
+      traefik.http.routers.hakobiya-auth.priority: "100"
+      traefik.http.routers.hakobiya-auth.service: authentik@docker
+
+networks:
+  proxy:
+    external: true

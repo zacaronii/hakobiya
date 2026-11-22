@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Other regions · Hakobiya{% endblock %}
+{% block main %}
+<p class="sub"><a href="/art">Art</a> / other regions</p>
+<h1>Images from other regions</h1>
+<p class="sub">RomM asks ScreenScraper for the Japanese image first and takes another region's when there is none.
+  "Check now" takes out the spines, box backs, 3D boxes, marquees and title screens that aren't Japanese
+  {%- if unasked %}; the same check also runs on its own every six hours{% else %} (it never runs on its own; set
+  HAKOBIYA_REGION_CHECK=1 for a check every six hours){% endif %}. The front of the box, the disc or cartridge and
+  the logo are only listed here: tick the ones to take out. Everything removed is kept below and can be put back.</p>
+{% if msg %}<div class="banner ok">{{ msg }}</div>{% endif %}
+{% if err %}<div class="banner">{{ err }}</div>{% endif %}
+
+<form method="post" action="/art/regions/remove" id="removeform">
+<div class="basket">
+  <span><b>{{ items|length }}</b> image{{ "" if items|length == 1 else "s" }} from another region in RomM now.
+    <b id="nsel">0</b> picked.</span>
+  <button id="removebtn" disabled>Remove picked</button>
+  <button class="ghost" formaction="/art/regions/check" formnovalidate>Check now</button>
+</div>
+<div class="artgrid">
+  {% for i in items %}
+  <div class="card">
+    <figure>
+      <a href="/art/regions/image/{{ i.rom_id }}/{{ i.kind }}" target="_blank"><img loading="lazy" src="/art/regions/image/{{ i.rom_id }}/{{ i.kind }}" alt=""></a>
+      <figcaption><label><input type="checkbox" name="item" value="{{ i.rom_id }}:{{ i.kind }}"> {{ i.label }}</label></figcaption>
+    </figure>
+    <div class="cname">{{ i.name }}</div>
+    <div><span class="chip warn">{{ i.region }}</span><span class="chip">{{ i.platform }}</span>
+      {% if i.put_back %}<span class="chip ok">put back by you</span>{% endif %}</div>
+  </div>
+  {% else %}
+  <p class="muted">Every image RomM holds is Japanese (or has no region, like fan art).</p>
+  {% endfor %}
+</div>
+</form>
+
+{% if changes %}
+<h2>Removed</h2>
+<div class="panel"><table>
+  {% for c in changes %}
+  <tr><td>{{ c.name }}</td><td>{{ c.label }} <span class="chip warn">{{ c.region }}</span></td>
+      <td class="muted">{{ c.removed_by or "automatic check" }}</td>
+      <td class="mono muted">{{ c.removed_at[:16].replace("T", " ") }}</td>
+      <td>{% if c.undone_at %}<span class="chip">put back</span>{% elif c.backup_path %}
+        <a href="/art/regions/removed/{{ c.id }}" target="_blank">view</a>
+        <form method="post" action="/art/regions/undo/{{ c.id }}" style="display:inline"><button class="ghost" style="padding:2px 10px;font-size:12px">Put back</button></form>
+        {% else %}<span class="muted">the file was already gone</span>{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+
+<script>
+(() => {
+  const boxes = [...document.querySelectorAll("input[name=item]")];
+  const n = document.getElementById("nsel"), btn = document.getElementById("removebtn");
+  boxes.forEach(b => b.addEventListener("change", () => {
+    const k = boxes.filter(x => x.checked).length; n.textContent = k; btn.disabled = !k;
+  }));
+})();
+</script>
+{% endblock %}

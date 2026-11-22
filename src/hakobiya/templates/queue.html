@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Sent · Hakobiya{% endblock %}
+{% block main %}
+<h1>Sent to qBittorrent</h1>
+<p class="sub">Files Hakobiya switched on, newest first. When a download finishes it's filed into RomM automatically
+  (hardlinked, converted to CHD or extracted, depending on the platform), then RomM scans that platform.
+  The original keeps seeding.</p>
+{% if qerr %}<div class="banner">qBittorrent isn't answering ({{ qerr }}), so download progress isn't shown.</div>{% endif %}
+{% if worker_error %}<div class="banner">The filing loop's last round failed ({{ worker_error }}); it retries every minute.</div>{% endif %}
+<div class="panel">
+<table>
+  <tr><th>File</th><th class="num">Size</th><th>State</th><th class="hide-sm">In the library</th><th class="hide-sm">Sent</th></tr>
+  {% for j in jobs %}
+  <tr>
+    <td class="name">{{ j.filename }}<div class="muted" style="font-size:12px">{{ j.set_name.split(" - ", 1)[1] if " - " in j.set_name else j.set_name }}</div></td>
+    <td class="num">{{ j.size|human }}</td>
+    <td>
+      {% if j.state == "done" %}<span class="chip ok">in RomM</span>
+      {% elif j.state == "exists" %}<span class="chip ok">already in RomM</span>
+      {% elif j.state in ("sent", "downloading") %}<span class="chip warn">{% if j.progress is not none %}{{ (j.progress * 100)|round(1) }}%{% else %}downloading{% endif %}</span>
+      {% elif j.state in ("ready", "processing") %}<span class="chip warn">{{ "filing…" if j.state == "processing" else "downloaded, filing soon" }}</span>
+      {% elif j.state == "waiting_space" %}<span class="chip warn">waiting for space</span>
+      {% elif j.state == "needs_rule" %}<span class="chip">no RomM folder for this set</span>
+      {% else %}<span class="chip stamp">failed</span>{% endif %}
+      {% if j.note and j.state not in ("sent", "downloading") %}<div class="muted" style="font-size:12px">{{ j.note }}</div>{% endif %}
+      {% if j.state in ("failed", "needs_rule", "waiting_space") %}
+      <form method="post" action="/job/{{ j.id }}/retry" style="margin-top:4px"><button class="ghost" style="padding:2px 10px;font-size:12px">Retry</button></form>
+      {% endif %}
+    </td>
+    <td class="hide-sm mono" style="word-break:break-all">{{ j.where or "" }}</td>
+    <td class="hide-sm mono muted">{{ j.created_at[:16].replace("T", " ") }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">Nothing sent yet.</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% endblock %}

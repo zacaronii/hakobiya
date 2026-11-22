@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}{{ platform.display_name or platform.name }} art · Hakobiya{% endblock %}
+{% block main %}
+<p class="sub"><a href="/art">Art</a> / {{ platform.fs_slug }}</p>
+<h1>{{ platform.display_name or platform.name }}</h1>
+{% if msg %}<div class="banner ok">{{ msg }}</div>{% endif %}
+{% if err %}<div class="banner">{{ err }}</div>{% endif %}
+<form class="filters" method="get">
+  <fieldset><legend>Show</legend>
+    <label><input type="radio" name="show" value="all" {% if show == "all" %}checked{% endif %}> all {{ cards|length if show == "all" else "" }}</label>
+    <label><input type="radio" name="show" value="flagged" {% if show == "flagged" %}checked{% endif %}> only flagged</label>
+  </fieldset>
+  {% if has_libretro %}<label><input type="checkbox" name="alt" value="true" {% if alt %}checked{% endif %}> compare with libretro's Japanese boxes</label>{% endif %}
+  <button>Show</button>
+</form>
+{% if not has_libretro %}<p class="muted">libretro-thumbnails has no collection for this platform, so there's nothing to compare with yet.</p>{% endif %}
+
+<form method="post" action="/art/apply" id="applyform">
+<input type="hidden" name="platform" value="{{ platform.id }}">
+{% if alt %}
+<div class="basket">
+  <span>Tick a libretro cover to use it instead. <b id="nsel">0</b> picked.</span>
+  <button id="applybtn" disabled>Replace picked covers</button>
+</div>
+{% endif %}
+<div class="artgrid">
+  {% for c in cards %}
+  <div class="card">
+    <div class="pair">
+      <figure>
+        {% if c.has_cover %}<a href="/art/cover/{{ c.id }}?size=big" target="_blank"><img loading="lazy" src="/art/cover/{{ c.id }}" alt=""></a>
+        {% else %}<div class="nocover">no cover</div>{% endif %}
+        <figcaption>{{ c.source }}{% if c.size %} · {{ c.size[0] }}×{{ c.size[1] }}{% endif %}</figcaption>
+      </figure>
+      {% if alt %}
+      <figure class="alt" data-rom="{{ c.id }}">
+        <label><img loading="lazy" src="/art/alt/{{ c.id }}" alt="" onerror="this.closest('figure').classList.add('none')">
+        <figcaption><input type="checkbox" name="rom" value="{{ c.id }}"> libretro JP</figcaption></label>
+        <div class="nocover">libretro has none</div>
+      </figure>
+      {% endif %}
+    </div>
+    <div class="cname">{{ c.name }}</div>
+    <div>{% for f in c.flags %}<span class="chip {{ 'stamp' if f == 'no cover' else 'warn' }}">{{ f }}</span>{% endfor %}</div>
+  </div>
+  {% else %}
+  <p class="muted">Nothing flagged on this platform.</p>
+  {% endfor %}
+</div>
+</form>
+
+{% if changes %}
+<h2>Covers changed here</h2>
+<div class="panel"><table>
+  {% for c in changes %}
+  <tr><td>{{ c.name }}</td><td class="muted">{{ c.source }}</td><td class="mono muted">{{ c.applied_at[:16].replace("T", " ") }}</td>
+      <td>{% if c.undone_at %}<span class="chip">undone</span>{% elif c.backup_path %}
+        <form method="post" action="/art/undo/{{ c.id }}"><button class="ghost" style="padding:2px 10px;font-size:12px">Undo</button></form>
+        {% else %}<span class="muted">had no cover before</span>{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+
+<script>
+(() => {
+  const boxes = [...document.querySelectorAll("input[name=rom]")];
+  const n = document.getElementById("nsel"), btn = document.getElementById("applybtn");
+  boxes.forEach(b => b.addEventListener("change", () => {
+    const k = boxes.filter(x => x.checked).length; n.textContent = k; btn.disabled = !k;
+  }));
+  const form = document.getElementById("applyform");
+  form.addEventListener("submit", () => { btn.disabled = true; btn.textContent = "Uploading…"; });
+})();
+</script>
+{% endblock %}

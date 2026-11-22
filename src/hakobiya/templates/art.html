@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Art · Hakobiya{% endblock %}
+{% block main %}
+<h1>Box art in RomM</h1>
+<p class="sub">Nothing changes on its own: open a platform, compare each cover with libretro's Japanese box, and
+  replace only the ones you pick. Replaced covers are kept so you can undo.</p>
+<div class="panel">
+<table>
+  <tr><th>Platform</th><th class="num">Games</th><th class="num">No cover</th><th class="num">Not Japanese</th></tr>
+  {% for p in platforms %}
+  <tr>
+    <td><a href="/art/p/{{ p.id }}">{{ p.display_name or p.name }}</a> <span class="mono muted">{{ p.fs_slug }}</span></td>
+    <td class="num">{{ p.games }}</td>
+    <td class="num">{% if p.missing %}<span class="chip stamp">{{ p.missing }}</span>{% else %}0{% endif %}</td>
+    <td class="num">{% if p.not_jp %}<span class="chip warn">{{ p.not_jp }}</span>{% else %}0{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+<p class="sub" style="margin-top:12px">Spines, box backs, discs, logos and screens are checked too:
+  <a href="/art/regions">images from other regions</a>.</p>
+{% if changes %}
+<h2>Recent cover changes</h2>
+<div class="panel"><table>
+  {% for c in changes %}
+  <tr><td>{{ c.name }}</td><td class="muted">{{ c.source }}</td><td class="mono muted">{{ c.applied_at[:16].replace("T", " ") }}</td>
+      <td>{% if c.undone_at %}<span class="chip">undone</span>{% else %}<a href="/art/p/{{ c.platform_id }}">open</a>{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+{% endblock %}

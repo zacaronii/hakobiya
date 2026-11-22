@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Make · Hakobiya{% endblock %}
+{% block main %}
+<h1>Disc and cartridge art</h1>
+{% if msg %}<div class="banner ok">{{ msg }}</div>{% endif %}
+<p class="sub">For games whose disc or cartridge image is missing or from another region: a Japanese one is made from
+  a real Japanese disc/cart of the same platform with the game's own box art printed on, previewed here, and saved
+  into RomM only when you pick it.</p>
+<div class="panel">
+<table>
+  <tr><th>Platform</th><th class="num">Games</th><th class="num">Missing</th><th class="num">Other region</th><th class="num">Made here</th></tr>
+  {% for p in platforms %}
+  <tr>
+    <td><a href="/make/p/{{ p.id }}">{{ p.display_name or p.name }}</a> <span class="mono muted">{{ p.fs_slug }}</span></td>
+    <td class="num">{{ p.games }}</td>
+    <td class="num">{% if p.missing %}<span class="chip stamp">{{ p.missing }}</span>{% else %}0{% endif %}</td>
+    <td class="num">{% if p.foreign %}<span class="chip warn">{{ p.foreign }}</span>{% else %}0{% endif %}</td>
+    <td class="num">{{ p.generated }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">No platform has a template yet.</td></tr>
+  {% endfor %}
+</table>
+</div>
+<p class="sub" style="margin-top:12px">Templates: {{ templates|join(", ") }}.</p>
+{% endblock %}

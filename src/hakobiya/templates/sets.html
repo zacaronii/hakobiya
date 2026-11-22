@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Sets · Hakobiya{% endblock %}
+{% block main %}
+{% if error %}<div class="banner">{{ error }}</div>{% endif %}
+{% if qerr %}<div class="banner">qBittorrent isn't answering ({{ qerr }}), so sets you already have aren't marked.</div>{% endif %}
+<h1>Minerva sets</h1>
+<p class="sub">{{ rows|length }} sets in Minerva's index{% if age_hours is not none %}, checked {{ age_hours }} h ago{% endif %}
+  · {{ have_count }} already in qBittorrent.
+  <form method="post" action="/refresh" style="display:inline"><button class="ghost" style="padding:2px 10px;font-size:13px">Check now</button></form></p>
+
+<form class="filters" onsubmit="return false">
+  <input type="search" id="filter" placeholder="Filter sets: famicom, playstation, saturn…" autofocus>
+  <label><input type="checkbox" id="haveonly"> Only sets I have</label>
+  <label><input type="checkbox" id="mappedonly" checked> Only RomM platforms</label>
+</form>
+
+{% for source in sources %}
+{% set group = rows|selectattr("source", "equalto", source)|list %}
+<details class="source" data-source {% if source in ("No-Intro", "Redump") %}open{% endif %}>
+  <summary>{{ source }} <span class="muted">· <span data-count>{{ group|length }}</span> sets</span></summary>
+  <div class="panel">
+  <table>
+    <tr><th>Set</th><th class="hide-sm">RomM folder</th><th class="num">Torrent</th><th class="hide-sm">Updated</th><th></th></tr>
+    {% for r in group %}
+    <tr data-row data-name="{{ r.name|lower }}" data-have="{{ 1 if r.have else 0 }}" data-mapped="{{ 1 if r.slug else 0 }}">
+      <td class="name"><a href="/set/{{ r.name|urlencode }}">{{ r.platform }}</a></td>
+      <td class="hide-sm mono">{{ r.slug or "" }}</td>
+      <td class="num">{{ r.size_text }}</td>
+      <td class="hide-sm mono muted">{{ r.modified[:10] }}</td>
+      <td>{% if r.have %}<span class="chip stamp">in qBittorrent</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+</details>
+{% endfor %}
+
+<script>
+(() => {
+  const box = document.getElementById("filter"), have = document.getElementById("haveonly"),
+        mapped = document.getElementById("mappedonly");
+  function apply() {
+    const words = box.value.toLowerCase().split(/\s+/).filter(Boolean);
+    document.querySelectorAll("details[data-source]").forEach(d => {
+      let n = 0;
+      d.querySelectorAll("tr[data-row]").forEach(tr => {
+        const ok = words.every(w => tr.dataset.name.includes(w))
+          && (!have.checked || tr.dataset.have === "1") && (!mapped.checked || tr.dataset.mapped === "1");
+        tr.classList.toggle("hide", !ok); if (ok) n++;
+      });
+      d.querySelector("[data-count]").textContent = n;
+      d.classList.toggle("hide", n === 0);
+      if (words.length && n) d.open = true;
+    });
+  }
+  [box, have, mapped].forEach(el => el.addEventListener("input", apply));
+  apply();
+})();
+</script>
+{% endblock %}

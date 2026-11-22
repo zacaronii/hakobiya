@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}{{ platform.display_name or platform.name }} · Make · Hakobiya{% endblock %}
+{% block main %}
+<p class="sub"><a href="/make">Make</a> / {{ platform.fs_slug }}</p>
+<h1>{{ platform.display_name or platform.name }}</h1>
+{% if msg %}<div class="banner ok">{{ msg }}</div>{% endif %}
+{% if err %}<div class="banner">{{ err }}</div>{% endif %}
+<form class="filters" method="get">
+  <fieldset><legend>Show</legend>
+    <label><input type="radio" name="show" value="needed" {% if show == "needed" %}checked{% endif %}> missing or other region</label>
+    <label><input type="radio" name="show" value="all" {% if show == "all" %}checked{% endif %}> all</label>
+  </fieldset>
+  <button>Show</button>
+</form>
+{% if not ready %}<p class="muted">No template for this platform yet.</p>{% else %}
+<form method="post" action="/make/save" id="saveform">
+<input type="hidden" name="platform" value="{{ platform.id }}">
+<div class="basket">
+  <span>Move the sliders until the art sits well, tick the ones to keep. <b id="nsel">0</b> picked.</span>
+  <button type="button" class="ghost" id="solobtn">One at a time</button>
+  <span class="solonav" hidden>
+    <button type="button" class="ghost" id="prevbtn" title="Previous (←)">← Previous</button>
+    <b id="solopos"></b>
+    <button type="button" class="ghost" id="nextbtn" title="Next (→)">Next →</button>
+  </span>
+  <button id="savebtn" disabled>Save picked into RomM</button>
+</div>
+<p class="sub solohint" hidden>← → to move between games · Space to keep or drop the one shown.</p>
+<div class="artgrid make" id="makegrid">
+  {% for c in cards %}
+  <div class="card" data-rom="{{ c.id }}">
+    <div class="pair">
+      <figure>
+        {% if c.has_physical %}<img loading="lazy" src="/make/physical/{{ c.id }}" alt="">{% else %}<div class="nocover round">none</div>{% endif %}
+        <figcaption>now: {{ c.label }}</figcaption>
+      </figure>
+      <figure class="alt">
+        {% if c.has_cover %}
+        <label><img loading="lazy" class="preview" src="/make/preview/{{ c.id }}" alt="">
+        <figcaption><input type="checkbox" name="rom" value="{{ c.id }}"> made from the box</figcaption></label>
+        {% else %}<div class="nocover round" style="display:grid">no box art to print</div>{% endif %}
+      </figure>
+    </div>
+    <div class="cname">{{ c.name }}</div>
+    {% if c.has_cover %}
+    <div class="sliders">
+      <label>position <input type="range" name="focus_{{ c.id }}" min="0" max="1" step="0.05" value="0.45"></label>
+      <label>zoom <input type="range" name="zoom_{{ c.id }}" min="1" max="2" step="0.05" value="1"></label>
+    </div>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">Every game here already has Japanese disc/cart art.</p>
+  {% endfor %}
+</div>
+</form>
+{% endif %}
+
+{% if changes %}
+<h2>Saved from here</h2>
+<p class="sub">Hakobiya looks after these: RomM can't lock disc art, so if a RomM metadata refresh replaces or drops
+  one, Restore puts it back. Once a week it asks ScreenScraper for a genuine Japanese scan, which then takes over.</p>
+<form method="post" action="/make/check" style="margin-bottom:8px"><input type="hidden" name="back" value="/make/p/{{ platform.id }}?show=all">
+  <button class="ghost">Check ScreenScraper now</button></form>
+<div class="panel"><table>
+  {% for c in changes %}
+  <tr><td>{{ c.name }}</td><td class="mono muted hide-sm">{{ c.applied_at[:16].replace("T", " ") }}</td>
+      <td>{% if c.undone_at %}<span class="chip">undone</span>
+          {% elif c.superseded_at %}<span class="chip ok">{{ "replaced by a genuine Japanese scan" if c.superseded_by != "saved again" else "saved again since" }}</span>
+            {% if c.superseded_by not in ("saved again",) %}<span class="muted" style="font-size:12px">({{ c.superseded_by }})</span>{% endif %}
+          {% elif c.live == "kept" %}<span class="chip ok">in RomM, managed here</span>
+            {% if c.checked_at %}<span class="muted" style="font-size:12px">no genuine scan yet ({{ c.checked_at[:10] }})</span>{% endif %}
+          {% elif c.live in ("overwritten", "dropped") %}<span class="chip stamp">{{ "RomM replaced it with another region's scan" if c.live == "overwritten" else "RomM dropped it" }}</span>
+            <form method="post" action="/make/restore/{{ c.id }}" style="display:inline"><button style="padding:2px 10px;font-size:12px">Restore</button></form>
+          {% endif %}</td>
+      <td>{% if not c.undone_at and not c.superseded_at %}
+        <form method="post" action="/make/undo/{{ c.id }}"><button class="ghost" style="padding:2px 10px;font-size:12px">Undo</button></form>{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+
+<script>
+(() => {
+  const boxes = [...document.querySelectorAll("input[name=rom]")];
+  const n = document.getElementById("nsel"), btn = document.getElementById("savebtn");
+  if (!btn) return;
+  boxes.forEach(b => b.addEventListener("change", () => {
+    const k = boxes.filter(x => x.checked).length; n.textContent = k; btn.disabled = !k;
+  }));
+  document.querySelectorAll(".card[data-rom]").forEach(card => {
+    const id = card.dataset.rom, img = card.querySelector("img.preview");
+    const f = card.querySelector(`[name=focus_${id}]`), z = card.querySelector(`[name=zoom_${id}]`);
+    if (!img || !f) return;
+    let t;
+    const update = () => { clearTimeout(t); t = setTimeout(() => {
+      img.src = `/make/preview/${id}?focus=${f.value}&zoom=${z.value}`; }, 250); };
+    f.addEventListener("input", update); z.addEventListener("input", update);
+  });
+  document.getElementById("saveform").addEventListener("submit", () => { btn.disabled = true; btn.textContent = "Saving…"; });
+
+  // One at a time: a single game fills the screen, with Previous/Next and arrow keys.
+  const grid = document.getElementById("makegrid"), cards = [...grid.querySelectorAll(".card[data-rom]")];
+  const soloBtn = document.getElementById("solobtn"), nav = document.querySelector(".solonav"),
+        hint = document.querySelector(".solohint"), pos = document.getElementById("solopos");
+  let i = 0, solo = false;
+  const show = k => {
+    i = (k + cards.length) % cards.length;
+    cards.forEach((c, n) => c.classList.toggle("current", n === i));
+    pos.textContent = `${i + 1} / ${cards.length}`;
+    cards[i].querySelectorAll("img[loading=lazy]").forEach(im => im.loading = "eager");
+  };
+  const setSolo = on => {
+    solo = on && cards.length > 0;
+    grid.classList.toggle("solo", solo);
+    nav.hidden = hint.hidden = !solo;
+    soloBtn.textContent = solo ? "Show all" : "One at a time";
+    if (solo) { show(i); window.scrollTo({top: grid.offsetTop - 140}); }
+    try { localStorage.setItem("hakobiya-make-solo", solo ? "1" : ""); } catch (e) {}
+  };
+  soloBtn.addEventListener("click", () => setSolo(!solo));
+  document.getElementById("prevbtn").addEventListener("click", () => show(i - 1));
+  document.getElementById("nextbtn").addEventListener("click", () => show(i + 1));
+  document.addEventListener("keydown", e => {
+    if (!solo || e.target.matches("input[type=range]")) return;
+    if (e.key === "ArrowRight") { show(i + 1); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { show(i - 1); e.preventDefault(); }
+    else if (e.key === " " && !e.target.matches("button, input[type=checkbox]")) {
+      const box = cards[i].querySelector("input[name=rom]");
+      if (box) { box.checked = !box.checked; box.dispatchEvent(new Event("change")); }
+      e.preventDefault();
+    }
+  });
+  let saved = "";
+  try { saved = localStorage.getItem("hakobiya-make-solo") || ""; } catch (e) {}
+  if (saved) setSolo(true);
+})();
+</script>
+{% endblock %}

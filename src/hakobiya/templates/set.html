@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}{{ set.platform }} · Hakobiya{% endblock %}
+{% block main %}
+<p class="sub"><a href="/">Sets</a> / {{ set.source }}</p>
+<h1>{{ set.platform }}</h1>
+<div class="stats">
+  <span><b>{{ set.file_count }}</b> files</span>
+  <span><b>{{ set.total_size|human }}</b> in the set</span>
+  <span>RomM folder: <b>{{ slug or "none yet" }}</b></span>
+  <span class="mono muted">{{ set.infohash[:12] }}</span>
+</div>
+{% if msg %}<div class="banner ok">{{ msg }} <a href="/queue">See what was sent</a></div>{% endif %}
+{% if err %}<div class="banner">Couldn't send: {{ err }}. Nothing in the basket was lost.</div>{% endif %}
+{% if qerr %}<div class="banner">qBittorrent isn't answering ({{ qerr }}), so download states aren't shown.</div>{% endif %}
+{% if qt %}<p><span class="chip stamp">in qBittorrent</span> <span class="muted">this exact torrent: files you picked before are marked</span></p>
+{% elif other %}<div class="banner">qBittorrent has a different torrent for this set folder ({{ other.hash[:12] }}). Its file states aren't shown here.</div>{% endif %}
+
+<form class="filters" method="get">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search file names…">
+  <fieldset><legend>Region</legend>
+    {% for r in region_choices %}<label><input type="checkbox" name="region" value="{{ r }}" {% if r in regions %}checked{% endif %}> {{ r }}</label>{% endfor %}
+  </fieldset>
+  <fieldset><legend>Also show</legend>
+    {% for t in hideable if t in hidden_default %}<label><input type="checkbox" name="show" value="{{ t }}" {% if t in shown %}checked{% endif %}> {{ t }}</label>{% endfor %}
+  </fieldset>
+  <fieldset><legend>Only</legend>
+    <label><input type="checkbox" name="missing" value="true" {% if missing %}checked{% endif %}> not in RomM</label>
+    {% if qt %}<label><select name="state" style="font:inherit">
+      <option value="" {% if not state %}selected{% endif %}>any state</option>
+      <option value="skipped" {% if state == "skipped" %}selected{% endif %}>not picked</option>
+      <option value="done" {% if state == "done" %}selected{% endif %}>downloaded</option>
+      <option value="downloading" {% if state == "downloading" %}selected{% endif %}>downloading</option>
+    </select></label>{% endif %}
+  </fieldset>
+  <button>Filter</button>
+</form>
+
+<div class="basket" id="basket" data-set="{{ set.name }}">
+  <span><b id="bcount">{{ basket.count }}</b> picked · <b id="bsize">{{ basket.size_text }}</b></span>
+  <form method="post" action="/pick/all">
+    <input type="hidden" name="set" value="{{ set.name }}"><input type="hidden" name="back" value="{{ query }}">
+    {% for r in regions %}<input type="hidden" name="region" value="{{ r }}">{% endfor %}
+    {% for t in shown %}<input type="hidden" name="show" value="{{ t }}">{% endfor %}
+    <input type="hidden" name="q" value="{{ q }}">{% if missing %}<input type="hidden" name="missing" value="true">{% endif %}
+    <input type="hidden" name="state" value="{{ state }}">
+    <button class="ghost" title="Every file these filters show, on all pages (not ones already downloading or sent)">Pick all {{ total }} shown</button>
+    <button class="ghost" name="clear" value="1">Clear</button>
+  </form>
+  <form method="post" action="/send" id="sendform">
+    <input type="hidden" name="set" value="{{ set.name }}"><input type="hidden" name="back" value="{{ query }}">
+    <button id="sendbtn" {% if not basket.count %}disabled{% endif %}>Send to qBittorrent</button>
+  </form>
+</div>
+
+<p class="sub">{{ total }} files match ({{ total_size|human }}){% if pages > 1 %} · page {{ page }} of {{ pages }}{% endif %}</p>
+<div class="panel">
+<table>
+  <tr><th><input type="checkbox" id="pagebox" title="Pick this page"></th><th>File</th><th class="hide-sm">Tags</th><th class="num">Size</th><th>State</th></tr>
+  {% for f in files %}
+  <tr>
+    <td>{% if f.sent %}<input type="checkbox" disabled checked title="Already sent">{% else %}<input type="checkbox" class="pick" value="{{ f.idx }}" {% if f.picked %}checked{% endif %}>{% endif %}</td>
+    <td class="name">{{ f.filename }}</td>
+    <td class="hide-sm">{% for r in f.regions %}<span class="chip">{{ r }}</span>{% endfor %}{% if f.disc %}<span class="chip">Disc {{ f.disc }}</span>{% endif %}{% if f.rev %}<span class="chip">Rev {{ f.rev }}</span>{% endif %}{% for t in f.tags %}<span class="chip warn">{{ t }}</span>{% endfor %}</td>
+    <td class="num">{{ f.size|human }}</td>
+    <td>{% if f.in_library %}<span class="chip ok">in RomM</span>{% endif %}
+        {% if f.state == "done" %}<span class="chip ok">downloaded</span>{% elif f.state == "downloading" %}<span class="chip warn">{{ (f.progress * 100)|round|int }}%</span>{% endif %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">Nothing matches these filters.</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% if pages > 1 %}
+<div class="pager">
+  {% set base = request.url.remove_query_params("page") %}
+  {% if page > 1 %}<a href="{{ base.include_query_params(page=page - 1) }}">← Previous</a>{% endif %}
+  <span class="muted">{{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a href="{{ base.include_query_params(page=page + 1) }}">Next →</a>{% endif %}
+</div>
+{% endif %}
+<script>
+(() => {
+  const box = document.getElementById("basket"), set = box.dataset.set;
+  const boxes = [...document.querySelectorAll("input.pick")], page = document.getElementById("pagebox");
+  async function pick(ids, on) {
+    const r = await fetch("/pick", {method: "POST", headers: {"Content-Type": "application/json"},
+                                    body: JSON.stringify({set, idx: ids, on})});
+    if (!r.ok) { alert("Couldn't update the basket"); return; }
+    const b = await r.json();
+    document.getElementById("bcount").textContent = b.count;
+    document.getElementById("bsize").textContent = b.size_text;
+    document.getElementById("sendbtn").disabled = !b.count;
+  }
+  boxes.forEach(cb => cb.addEventListener("change", () => pick([+cb.value], cb.checked)));
+  page.checked = boxes.length > 0 && boxes.every(cb => cb.checked);
+  page.addEventListener("change", () => {
+    const ids = boxes.filter(cb => cb.checked !== page.checked).map(cb => (cb.checked = page.checked, +cb.value));
+    if (ids.length) pick(ids, page.checked);
+  });
+  document.getElementById("sendform").addEventListener("submit", () => {
+    document.getElementById("sendbtn").disabled = true;
+    document.getElementById("sendbtn").textContent = "Sending…";
+  });
+})();
+</script>
+{% endblock %}

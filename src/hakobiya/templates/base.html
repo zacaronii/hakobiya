@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Hakobiya{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="/static/style.css?v={{ version }}">
+</head>
+<body>
+<header>
+  <a class="brand" href="/"><div class="hanko">運</div><b>Hakobiya</b><span>運び屋 · Minerva → RomM</span></a>
+  <nav>
+    <a href="/">Sets</a>
+    <a href="/queue">Sent</a>
+    <a href="/art">Art</a>
+    <a href="/make">Make</a>
+    {% if user %}<span>{{ user }}</span>{% endif %}
+    <span class="mono">v{{ version }}</span>
+  </nav>
+</header>
+<main>
+{% block main %}{% endblock %}
+</main>
+</body>
+</html>
