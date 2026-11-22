@@ -40,3 +40,5 @@ for the scan; `DATA_ROOT` (default /data, where `torrents/` lives); `HAKOBIYA_WO
 `HAKOBIYA_PUBLIC_URL`: the address named when a request without the key is refused). An example deployment behind
 Traefik and Authentik is in [deploy/docker-compose.yml](deploy/docker-compose.yml).
 Tests: `pip install -e ".[dev]" && pytest`.
+
+Licence: GPL-3.0 ([LICENSE](LICENSE)).
