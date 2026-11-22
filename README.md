@@ -41,4 +41,4 @@ for the scan; `DATA_ROOT` (default /data, where `torrents/` lives); `HAKOBIYA_WO
 Traefik and Authentik is in [deploy/docker-compose.yml](deploy/docker-compose.yml).
 Tests: `pip install -e ".[dev]" && pytest`.
 
-Licence: GPL-3.0 ([LICENSE](LICENSE)).
+Licence: GPL-3.0-only, version 3 of the GNU General Public License and not later versions ([LICENSE](LICENSE)).
