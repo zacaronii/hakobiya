@@ -60,6 +60,10 @@ class QBit:
     async def start(self, infohash: str) -> None:
         await self.post("torrents/start", {"hashes": infohash})
 
+    async def delete(self, infohash: str) -> None:
+        """Remove a torrent and the files it downloaded."""
+        await self.post("torrents/delete", {"hashes": infohash, "deleteFiles": "true"})
+
     async def add_stopped(self, torrent_bytes: bytes, filename: str, tags: str) -> None:
         # `stopped` is WebAPI 2.11+ (qBittorrent 5), `paused` the older name; both are sent.
         text = await self.post("torrents/add", {"stopped": "true", "paused": "true", "tags": tags,

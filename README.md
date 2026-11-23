@@ -40,6 +40,19 @@ RomM in the right format.
   manual taken out again. Only archive.org is contacted, one request at a time; search answers are kept for a
   week and file lists for a month. A PDF fetched for a look is kept for a week at most (`/config/manual-cache`,
   2 GB at most). Items that hold only page images aren't turned into a manual yet.
+- **Manuals out of PS one Classics packages (0.9.0):** Sony's PS one Classics release of a game carries its manual
+  (PNG pages, 480 pixels wide: readable, not sharp). On a PlayStation game's manual page, "Fetch the package" has
+  qBittorrent fetch that one package from Minerva's PS one Classics set (several hundred MB for a few MB of
+  manual). Hakobiya reads the manual out of it, keeps it as a PDF in `/config/package-manuals`, and it is looked
+  at and ticked like any other; nothing is fetched or put into RomM unasked. The packages are encrypted, and the
+  keys are not in this repository: put them into `/config/psn-keys.txt` as `name = hex` lines (`pkg_psp` or
+  `pkg_ps3`, 16 bytes; `document_key` and `document_iv`, 8 bytes each; `#` starts a comment). Without that file
+  the section only says so.
+  After a package is read, Hakobiya **removes its torrent and files from qBittorrent again**, but only a torrent
+  it added itself for manuals (tag `hakobiya-manual`), and only when no other package of it is still on its way,
+  nothing was sent from the set's own page, and no other file in it is switched on or downloaded. Otherwise, or
+  when the set already was in qBittorrent, nothing is removed or switched off, and the page says so. A package
+  that couldn't be read stays for "Try again"; "Stop" gives one up under the same rule.
 - Plan and house rules for Minerva access: [PLAN.md](PLAN.md).
 
 Run: `python -m hakobiya` (env: `HAKOBIYA_CONFIG`, `ROMM_LIBRARY`, `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD`,

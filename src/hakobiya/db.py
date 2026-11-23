@@ -69,6 +69,13 @@ SCHEMA = [
         identifier TEXT NOT NULL, file TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL,
         old_state TEXT NOT NULL, backup_path TEXT, applied_at TEXT NOT NULL, applied_by TEXT, undone_at TEXT);
     """,
+    # v9: packages fetched for the manual inside them (downloading -> ready | none (no manual in it) | failed)
+    """
+    CREATE TABLE package_manuals (
+        id INTEGER PRIMARY KEY, set_name TEXT NOT NULL, idx INTEGER NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
+        infohash TEXT NOT NULL, state TEXT NOT NULL, note TEXT, pages INTEGER, pdf_path TEXT, asked_by TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (set_name, idx));
+    """,
 ]
 
 

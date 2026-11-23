@@ -48,6 +48,14 @@ class ArchiveError(RuntimeError):
 
 
 # ------------------------------------------------------------------ what a game has now
+OTHER_SOURCES = {":psn": "PS one Classics package"}    # manual_changes.identifier values that aren't Archive items
+
+
+def source_label(identifier: str) -> str:
+    """Where a manual Hakobiya put into RomM came from, for the pages."""
+    return OTHER_SOURCES.get(identifier) or f"Internet Archive: {identifier}"
+
+
 def manual_state(rom: dict, change: dict | None = None) -> tuple[str, bool]:
     """(label, is it Japanese) for the manual RomM has for a game. `change` is Hakobiya's own record for the game,
     given only while the file it put there is still the one in RomM: RomM's API doesn't tell an uploaded manual
@@ -55,7 +63,7 @@ def manual_state(rom: dict, change: dict | None = None) -> tuple[str, bool]:
     if not rom.get("path_manual"):
         return "no manual", False
     if change:
-        return f"Internet Archive: {change['identifier']}", True
+        return source_label(change["identifier"]), True
     if not rom.get("url_manual"):
         return "uploaded", True
     region = region_of(rom["url_manual"])

@@ -25,7 +25,7 @@
 <h2>Manuals put into RomM</h2>
 <div class="panel"><table>
   {% for c in changes %}
-  <tr><td><a href="/manuals/g/{{ c.rom_id }}">{{ c.name }}</a></td><td class="muted">Internet Archive: {{ c.identifier }}</td>
+  <tr><td><a href="/manuals/g/{{ c.rom_id }}">{{ c.name }}</a></td><td class="muted">{{ c.identifier|manual_source }}</td>
       <td class="mono muted">{{ c.applied_at[:16].replace("T", " ") }}</td>
       <td>{% if c.undone_at %}<span class="chip">put back</span>{% else %}<span class="chip ok">in RomM</span>{% endif %}</td></tr>
   {% endfor %}

@@ -41,6 +41,48 @@
 </table></div>
 {% endif %}
 
+{% if psn and not link %}
+<h2>In PS one Classics packages</h2>
+{% if not psn["keys"] %}
+<p class="muted">{% if psn.problem %}<span class="mono">{{ psn.key_file }}</span> can't be used: {{ psn.problem }}.
+  {% else %}The Japanese PS one Classics packages carry the game's manual. Hakobiya reads it once
+  <span class="mono">{{ psn.key_file }}</span> is in its config folder (the README says what goes into it).{% endif %}</p>
+{% elif not psn.loaded %}
+<p class="muted">The set's list of packages isn't loaded yet.
+  <button class="ghost" formaction="/manuals/psn/open" formnovalidate>Load it from Minerva</button></p>
+{% elif not psn.files %}
+<p class="muted">No Japanese package in the set has this game's title.</p>
+{% else %}
+<p class="sub">A package comes whole through qBittorrent (several hundred MB for a few MB of manual). Hakobiya reads the
+  manual out of it and then removes the package from qBittorrent again, unless the set is used for other things there.</p>
+<div class="panel"><table>
+  {% for f in psn.files %}{% set row = f.row %}
+  <tr>
+    <td class="name">{% if row and row.state == "ready" %}<label style="white-space:normal"><input type="radio" name="pick" value="{{ psn.source }}/{{ row.id }}" required>
+      {{ f.filename }}</label>{% else %}{{ f.filename }}{% endif %}
+      <span class="chip">{{ "same title" if f.match == "same" else "similar title" }}</span></td>
+    <td class="num mono muted">{{ f.size|human }}</td>
+    {% if not row %}
+    <td class="muted">not fetched</td>
+    <td><button class="ghost" name="idx" value="{{ f.idx }}" formaction="/manuals/psn/fetch" formnovalidate>Fetch the package</button></td>
+    {% elif row.state == "downloading" %}
+    <td class="muted">on its way{% if f.percent is not none %}: {{ f.percent }}%{% endif %} (reload to see)</td>
+    <td><button class="ghost" name="row" value="{{ row.id }}" formaction="/manuals/psn/stop" formnovalidate>Stop</button></td>
+    {% elif row.state == "ready" %}
+    <td class="muted">{{ row.pages }} pages{% if row.note %}. {{ row.note }}{% endif %}</td>
+    <td><a href="/manuals/psn/{{ row.id }}" target="_blank">Look at it</a></td>
+    {% elif row.state == "none" %}
+    <td class="muted" colspan="2">This package has no manual in it.{% if row.note %} {{ row.note }}{% endif %}</td>
+    {% else %}
+    <td class="muted" style="white-space:normal">didn't work: {{ row.note }}</td>
+    <td><button class="ghost" name="idx" value="{{ f.idx }}" formaction="/manuals/psn/fetch" formnovalidate>Try again</button></td>
+    {% endif %}
+  </tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+{% endif %}
+
 <h2>{{ "The item" if link else "Found on the Internet Archive" }}</h2>
 {% for it in found %}
 <div class="panel" style="margin-bottom:10px"><table>
@@ -65,7 +107,7 @@
 <h2>Manuals Hakobiya put into RomM for this game</h2>
 <div class="panel"><table>
   {% for c in changes %}
-  <tr><td class="name">{{ c.file }}<br><span class="mono muted">{{ c.identifier }}</span></td>
+  <tr><td class="name">{{ c.file }}<br><span class="mono muted">{{ c.identifier|manual_source if c.identifier[:1] == ":" else c.identifier }}</span></td>
       <td class="muted">before: {{ c.old_state }}{% if c.backup_path %} · <a href="/manuals/kept/{{ c.id }}" target="_blank">open the kept one</a>{% endif %}</td>
       <td class="mono muted">{{ c.applied_at[:16].replace("T", " ") }}</td>
       <td>{% if c.undone_at %}<span class="chip">put back</span>{% else %}
@@ -78,7 +120,10 @@
 (() => {
   const form = document.getElementById("applyform"), btn = document.getElementById("applybtn");
   form.addEventListener("change", () => { btn.disabled = !form.querySelector("input[name=pick]:checked"); });
-  form.addEventListener("submit", () => { btn.disabled = true; btn.textContent = "Uploading…"; });
+  form.addEventListener("submit", (e) => {    // the package buttons send this form too, to their own addresses
+    if (e.submitter && e.submitter !== btn) return;
+    btn.disabled = true; btn.textContent = "Uploading…";
+  });
 })();
 </script>
 {% endblock %}
