@@ -42,10 +42,13 @@
 {% endif %}
 
 {% if psn and not link %}
-<h2>In PS one Classics packages</h2>
+<h2>In {{ psn.label }} packages</h2>
+<input type="hidden" name="kind" value="{{ psn.kind }}">
 {% if not psn["keys"] %}
 <p class="muted">{% if psn.problem %}<span class="mono">{{ psn.key_file }}</span> can't be used: {{ psn.problem }}.
-  {% else %}The Japanese PS one Classics packages carry the game's manual. Hakobiya reads it once
+  {% elif psn.missing %}<span class="mono">{{ psn.key_file }}</span> doesn't have what these packages need yet:
+  {{ psn.missing|join(", ") }} (the README says what they are).
+  {% else %}Japanese {{ psn.label }} packages can carry the game's manual. Hakobiya reads it once
   <span class="mono">{{ psn.key_file }}</span> is in its config folder (the README says what goes into it).{% endif %}</p>
 {% elif not psn.loaded %}
 <p class="muted">The set's list of packages isn't loaded yet.

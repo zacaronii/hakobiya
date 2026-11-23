@@ -1,5 +1,6 @@
-"""Manuals out of PS one Classics packages: the reader (against packages built here, with keys made up here), the
-PDF, and the page that fetches a package, reads it, removes it again and puts its manual into RomM."""
+"""Manuals out of PlayStation Store packages (PS one Classics, PSP): the reader (against packages built here, with
+keys made up here), the PDF, and the page that fetches a package, reads it, removes it again and puts its manual
+into RomM."""
 import asyncio
 import hashlib
 import io
@@ -13,7 +14,8 @@ from urllib.parse import parse_qs, unquote
 import httpx
 import pytest
 import respx
-from cryptography.hazmat.primitives.ciphers import Cipher, modes
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.cmac import CMAC
 from fastapi.testclient import TestClient
 from PIL import Image
 from pypdf import PdfReader
@@ -25,7 +27,8 @@ from hakobiya.db import DB
 from hakobiya.qbit import QBit
 
 HEAD = {"origin": "http://testserver", "x-hakobiya-key": "k", "x-authentik-username": "someone"}
-KEYS = packages.Keys((("pkg_psp", os.urandom(16)), ("pkg_ps3", os.urandom(16))), os.urandom(8), os.urandom(8))
+KEYS = packages.Keys((("pkg_psp", os.urandom(16)), ("pkg_ps3", os.urandom(16))), os.urandom(8), os.urandom(8),
+                     tuple((n, os.urandom(packages.KEY_NAMES[n])) for n in packages.NEEDS["psp"] if n != "pkg_psp"))
 OLD = b"%PDF-1.4\nthe manual RomM had\n%%EOF"
 
 
@@ -38,35 +41,67 @@ def png(width=48, height=64, seed=1, mode="RGB") -> bytes:
     return out.getvalue()
 
 
-def des(data: bytes, keys=KEYS) -> bytes:
-    e = Cipher(packages.TripleDES(keys.document_key * 3), modes.CBC(keys.document_iv)).encryptor()
+def des(data: bytes, keys=KEYS, key=None) -> bytes:
+    e = Cipher(packages.TripleDES((key or keys.document_key) * 3), modes.CBC(keys.document_iv)).encryptor()
     return e.update(bytes(data)) + e.finalize()
 
 
-def document(pages: list[bytes | None], keys=KEYS, exponent=0) -> bytes:
-    """A DOCUMENT.DAT with these PNG pages; None leaves a page's slot empty."""
+def document(pages: list[bytes | None], keys=KEYS, exponent=0, key=None, tail=0x20) -> bytes:
+    """A DOCUMENT.DAT with these PNG pages; None leaves a page's slot empty. `tail` bytes stand where the checksums
+    are; `key` is the manual's own key when it isn't the fixed one."""
+    def des(data):
+        return globals()["des"](data, keys, key)
+
     size = packages.INFO_SIZE[exponent]
     head, info = bytearray(0x60), bytearray(size)
     head[:4] = b"DOC "
     struct.pack_into("<I", head, 0x1c, exponent)
     info[:4] = b"\xff" * 4
     struct.pack_into("<I", info, 4, len(pages))
-    out = bytearray(packages.PGD_EMPTY + des(head, keys) + bytes(0x20) + bytes(size))
+    out = bytearray(packages.PGD_EMPTY + des(head) + bytes(tail) + bytes(size) + bytes(tail))
     for i, page in enumerate(pages):
         if page is None:
             continue
         body = bytearray(page + bytes(-len(page) % 8 + 16))
         parts = [(0, 0x40), (0x80, 0x28), (len(body) - 16, 16)]        # only parts of a page are encrypted
         for start, length in parts:
-            body[start:start + length] = des(body[start:start + length], keys)
+            body[start:start + length] = des(body[start:start + length])
         first = bytearray(0x20)
         struct.pack_into("<I", first, 8, len(parts))
-        whole = des(first, keys) + des(b"".join(struct.pack("<II", *p) for p in parts), keys) + body + bytes(0x20)
+        whole = des(first) + des(b"".join(struct.pack("<II", *p) for p in parts)) + body + bytes(tail)
         struct.pack_into("<I", info, 8 + i * 0x80, len(out))
         struct.pack_into("<I", info, 8 + i * 0x80 + 12, len(whole))
         out += whole
-    out[16 + 0x80:16 + 0x80 + size] = des(info, keys)
+    out[16 + 0x60 + tail:16 + 0x60 + tail + size] = des(info)
     return bytes(out)
+
+
+def docinfo(key: bytes, keys=KEYS) -> bytes:
+    """A DOCINFO.EDAT that holds this 8-byte key: an EDAT header, then a PGD of one block."""
+    k = dict(keys.psp)
+    own, seed, inner = os.urandom(16), os.urandom(16), os.urandom(16)    # the PGD's key, its seed, the data's key
+
+    def mac(data):
+        c = CMAC(algorithms.AES(k["kirk_38"]))
+        c.update(bytes(data))
+        return packages.aes(k["kirk_38"], packages.xor(packages.xor(c.finalize(), k["pgd_mac_xor"]), own), True)
+
+    def box(data, seed):
+        t = packages.aes(k["kirk_39"], packages.xor(packages.xor(seed, own), k["pgd_seed_xor"]))
+        t = packages.xor(t, k["pgd_stream_xor"])
+        counters = b"".join(t[:12] + struct.pack("<I", 1 + i) for i in range(len(data) // 16))
+        return packages.xor(data, packages.aes(k["kirk_63"], counters))
+
+    p = bytearray(0xb0)
+    p[:12] = b"\0PGD" + struct.pack("<II", 1, 1)
+    p[0x10:0x20] = seed
+    p[0x30:0x60] = box(inner + struct.pack("<IIII", 0, len(key), 0x400, 0x90) + bytes(16), seed)
+    p[0x90:0xa0] = box(key + bytes(8), inner)
+    p[0xa0:0xb0] = os.urandom(16)                                        # the block's own check, which isn't read
+    p[0x60:0x70] = mac(p[0xa0:0xb0])
+    p[0x70:0x80] = mac(p[:0x70])
+    p[0x80:0x90] = os.urandom(16)                                        # the header's other check, not read either
+    return b"\0PSPEDAT" + bytes(4) + struct.pack("<I", 0x80) + bytes(0x70) + bytes(p)
 
 
 def package(items: list[tuple[str, bytes, str]], keys=KEYS, table_key="pkg_ps3") -> bytes:
@@ -112,6 +147,21 @@ def with_manual(pages=PAGES, keys=KEYS) -> bytes:
     return package([GAME[1], GAME[0], ("USRDIR/CONTENT/DOCUMENT.DAT", document(pages, keys), "pkg_psp")], keys)
 
 
+def psp_parts(pages=PAGES, keys=KEYS, exponent=0) -> tuple[bytes, bytes]:
+    """A PSP package's DOCINFO.EDAT and DOCUMENT.DAT: the manual under a key of its own, which the EDAT holds."""
+    key = os.urandom(8)
+    return docinfo(key, keys), document(pages, keys, exponent, packages.xor(key, dict(keys.psp)["document_xor"]), 0x30)
+
+
+def psp_package(edat: bytes | None, manual: bytes | None, keys=KEYS) -> bytes:
+    items = [GAME[0], ("USRDIR/CONTENT/DOCINFO.EDAT", edat, "pkg_psp"), ("USRDIR/CONTENT/DOCUMENT.DAT", manual, "pkg_psp")]
+    return package([i for i in items if i[1] is not None], keys, table_key="pkg_psp")
+
+
+def psp_with_manual(pages=PAGES, keys=KEYS) -> bytes:
+    return psp_package(*psp_parts(pages, keys), keys)
+
+
 # ------------------------------------------------------------------ the key file
 def test_the_keys_come_from_a_file_in_the_config_folder(tmp_path):
     f = tmp_path / "psn-keys.txt"
@@ -126,6 +176,28 @@ def test_the_keys_come_from_a_file_in_the_config_folder(tmp_path):
         with pytest.raises(packages.PackageError, match=says) as e:
             packages.load_keys(f)
         assert "0a0a" not in str(e.value)                                # a key is never repeated in a message
+
+
+def test_the_names_for_psp_packages_are_extra(tmp_path):
+    f = tmp_path / "psn-keys.txt"
+    four = "pkg_ps3 = " + "0a" * 16 + "\ndocument_key = " + "0b" * 8 + "\ndocument_iv = " + "0c" * 8 + "\n"
+    f.write_text(four)
+    keys = packages.load_keys(f)                                         # a key file from before: as it was
+    assert keys == packages.Keys((("pkg_ps3", b"\x0a" * 16),), b"\x0b" * 8, b"\x0c" * 8)
+    assert keys.missing("ps1") == [] and keys.missing("psp") == list(packages.NEEDS["psp"])
+    more = {n: bytes([i + 1]) * packages.KEY_NAMES[n] for i, n in enumerate(packages.NEEDS["psp"])}
+    f.write_text(four + "".join(f"{n} = {v.hex()}\n" for n, v in more.items() if n != "kirk_39"))
+    keys = packages.load_keys(f)
+    assert keys.missing("psp") == ["kirk_39"] and dict(keys.psp)["document_xor"] == more["document_xor"]
+    assert dict(keys.pkg)["pkg_psp"] == more["pkg_psp"] and "pkg_psp" not in dict(keys.psp)
+    f.write_text(four + "".join(f"{n} = {v.hex()}\n" for n, v in more.items()))
+    assert packages.load_keys(f).missing("psp") == []
+    for bad, says in (("kirk_38 = " + "0d" * 8, "wrong length"), ("document_xor = " + "0d" * 16, "wrong length"),
+                      ("kirk_40 = " + "0d" * 16, "isn't a key")):
+        f.write_text(four + bad + "\n")
+        with pytest.raises(packages.PackageError, match=says) as e:
+            packages.load_keys(f)
+        assert "0d0d" not in str(e.value)
 
 
 # ------------------------------------------------------------------ the reader and the PDF
@@ -186,6 +258,74 @@ def test_what_can_t_be_read_says_why_and_writes_nothing(tmp_path):
         assert not out.exists()
 
 
+# ------------------------------------------------------------------ a PSP package: the key is in DOCINFO.EDAT
+def test_a_psp_package_s_manual_is_read_with_the_key_in_its_docinfo(tmp_path):
+    z = zipped(tmp_path / "in/Hoshi no Fune (Japan).zip", psp_with_manual(PAGES[:2] + [None] + PAGES[2:]))
+    out = tmp_path / "out/manual.pdf"
+    assert packages.manual_pdf(z, KEYS, out, "psp") == 3
+    pdf = PdfReader(out)
+    assert len(pdf.pages) == 3
+    for page, source in zip(pdf.pages, PAGES):
+        want = Image.open(io.BytesIO(source))
+        got = page.images[0].image
+        assert got.size == want.size and got.convert("RGB").tobytes() == want.tobytes()
+    edat, manual = psp_parts(PAGES[:1], exponent=1)                      # the larger page table; the manual first
+    assert len(edat) == 0x130
+    other_way = package([("USRDIR/CONTENT/DOCUMENT.DAT", manual, "pkg_psp"), GAME[0],
+                         ("USRDIR/CONTENT/DOCINFO.EDAT", edat, "pkg_psp")], table_key="pkg_psp")
+    assert packages.manual_pdf(zipped(tmp_path / "b.zip", other_way), KEYS, tmp_path / "b.pdf", "psp") == 1
+    with pytest.raises(packages.PackageError, match="doesn't open this manual"):    # each kind has its own layout
+        packages.manual_pdf(z, KEYS, tmp_path / "c.pdf")
+    with pytest.raises(packages.PackageError, match="not the DOCINFO.EDAT"):
+        packages.manual_pdf(zipped(tmp_path / "d.zip", with_manual()), KEYS, tmp_path / "d.pdf", "psp")
+
+
+def test_a_wrong_psp_key_says_so(tmp_path):
+    z, out = zipped(tmp_path / "a.zip", psp_with_manual()), tmp_path / "a.pdf"
+    for name, _ in KEYS.psp:
+        other = tuple((n, os.urandom(len(v)) if n == name else v) for n, v in KEYS.psp)
+        says = "key in the package's DOCINFO.EDAT doesn't open" if name == "document_xor" else "PSP keys don't open"
+        with pytest.raises(packages.PackageError, match=says):
+            packages.manual_pdf(z, packages.Keys(KEYS.pkg, KEYS.document_key, KEYS.document_iv, other), out, "psp")
+        assert not out.exists()
+    only_ps_one = packages.Keys(KEYS.pkg, KEYS.document_key, KEYS.document_iv)
+    with pytest.raises(packages.PackageError, match="key file has no kirk_38, kirk_39"):
+        packages.manual_pdf(z, only_ps_one, out, "psp")
+    assert packages.manual_pdf(z, KEYS, out, "psp") == 3
+
+
+def test_a_docinfo_that_was_changed_or_is_missing_says_so(tmp_path):
+    edat, manual = psp_parts()
+    out, n = tmp_path / "a.pdf", 0
+
+    def read(edat, manual=manual):
+        nonlocal n
+        n += 1
+        return packages.manual_pdf(zipped(tmp_path / f"{n}.zip", psp_package(edat, manual)), KEYS, out, "psp")
+
+    def flipped(at):
+        return edat[:at] + bytes([edat[at] ^ 0x10]) + edat[at + 1:]     # not a DES key's parity bit
+
+    # its header, the data's key, what the data is like, the table's check, the header's check, the table
+    for at in (0x80 + 0x18, 0x80 + 0x20, 0x80 + 0x38, 0x80 + 0x44, 0x80 + 0x4c, 0x80 + 0x68, 0x80 + 0x78, 0x80 + 0xa4):
+        with pytest.raises(packages.PackageError, match="or the file is damaged"):
+            read(flipped(at))
+    with pytest.raises(packages.PackageError, match="doesn't open this manual"):      # the key itself
+        read(flipped(0x80 + 0x92))
+    for bad in (edat[:-1], flipped(3), flipped(0x0c), flipped(0x80 + 2), flipped(0x80 + 4), b"\0" * 0x130):
+        with pytest.raises(packages.PackageError, match="DOCINFO.EDAT is of a kind"):
+            read(bad)
+    with pytest.raises(packages.PackageError, match="DOCINFO.EDAT has a size or place"):
+        read(edat + bytes(packages.MAX_EDAT))
+    with pytest.raises(packages.PackageError, match="not the DOCINFO.EDAT that holds its key"):
+        read(None)
+    with pytest.raises(packages.PackageError, match="lies outside|shorter than its header"):
+        read(edat, manual[:-0x40])
+    assert not out.exists()
+    assert read(edat, None) == 0 and not out.exists()                    # a package without a manual
+    assert read(edat) == 3
+
+
 # ------------------------------------------------------------------ the page: fetch, read, remove, apply
 def bencode(x) -> bytes:
     if isinstance(x, int):
@@ -198,13 +338,20 @@ def bencode(x) -> bytes:
 
 
 FILES = ["Moon Garden (Japan).zip", "Moon Garden 2 (Japan).zip", "Moon Garden (USA).zip", "Star Road (Japan).zip",
-         "Kaze no Machi (Japan).zip"]
+         "Kaze no Machi (Japan).zip", "Hoshi no Fune (Japan).zip"]
+PSP_FILES = ["Hoshi no Fune (Japan).zip", "Hoshi no Fune (USA).zip", "Moon Garden (Japan).zip"]
 TORRENT = bencode({b"info": {b"name": b"PS one Classics", b"piece length": 16384, b"pieces": b"\0" * 20,
                              b"files": [{b"length": 600_000_000 + i, b"path": [f.encode()]} for i, f in enumerate(FILES)]}})
 T = torrent.parse(TORRENT)
+PSP_TORRENT = bencode({b"info": {b"name": b"PSP packages", b"piece length": 16384, b"pieces": b"\0" * 20,
+                                 b"files": [{b"length": 900_000_000 + i, b"path": [f.encode()]}
+                                            for i, f in enumerate(PSP_FILES)]}})
+PT = torrent.parse(PSP_TORRENT)
 INDEX = ('<table><tr><td class="indexcolname"><a href="Minerva_Myrient%20-%20No-Intro%20-%20Sony%20-%20PlayStation%20'
          '(PS%20one%20Classics)%20(PSN).torrent">the set</a></td><td class="indexcollastmod">2026-01-01 00:00  </td>'
-         '<td class="indexcolsize"> 1M</td></tr></table>')
+         '<td class="indexcolsize"> 1M</td></tr><tr><td class="indexcolname"><a href="Minerva_Myrient%20-%20No-Intro%20-'
+         '%20Sony%20-%20PlayStation%20Portable%20(PSN)%20(Encrypted).torrent">the other set</a></td>'
+         '<td class="indexcollastmod">2026-01-01 00:00  </td><td class="indexcolsize"> 1M</td></tr></table>')
 ROMS = [
     {"id": 1, "name": "Moon Garden", "fs_name": "Moon Garden (Japan).chd", "fs_name_no_tags": "Moon Garden",
      "alternative_names": ["つきのにわ"], "platform_id": 9, "platform_fs_slug": "psx",
@@ -213,21 +360,23 @@ ROMS = [
      "alternative_names": [], "platform_id": 4, "platform_fs_slug": "gba", "path_manual": "", "url_manual": ""},
     {"id": 3, "name": "Kaze no Machi", "fs_name": "Kaze no Machi (Japan).chd", "fs_name_no_tags": "Kaze no Machi",
      "alternative_names": [], "platform_id": 9, "platform_fs_slug": "psx", "path_manual": "", "url_manual": ""},
+    {"id": 4, "name": "Hoshi no Fune", "fs_name": "Hoshi no Fune (Japan).iso", "fs_name_no_tags": "Hoshi no Fune",
+     "alternative_names": [], "platform_id": 11, "platform_fs_slug": "psp", "path_manual": "", "url_manual": ""},
 ]
 
 
 class FakeQBit:
     """Just enough of qBittorrent's WebAPI for one set's torrent."""
 
-    def __init__(self, tags: str | None = None, on=()):
-        self.torrent, self.calls, self.deleted = None, [], []
+    def __init__(self, tags: str | None = None, on=(), t=T):
+        self.t, self.torrent, self.calls, self.deleted = t, None, [], []
         if tags is not None:
             self.load(tags, on)
 
     def load(self, tags, on=()):
-        self.torrent = {"hash": T.infohash, "name": T.name, "state": "downloading", "tags": tags,
+        self.torrent = {"hash": self.t.infohash, "name": self.t.name, "state": "downloading", "tags": tags,
                         "files": [{"index": f.index, "name": f.path, "priority": 1 if f.index in on else 0,
-                                   "progress": 0.0} for f in T.files]}
+                                   "progress": 0.0} for f in self.t.files]}
 
     def file(self, idx: int) -> dict:
         return self.torrent["files"][idx]
@@ -243,15 +392,16 @@ class FakeQBit:
         if path in ("auth/login", "auth/logout"):
             return httpx.Response(204)
         if path == "torrents/info":
-            mine = self.torrent and request.url.params.get("hashes", T.infohash) == T.infohash
+            mine = self.torrent and request.url.params.get("hashes", self.t.infohash) == self.t.infohash
             return httpx.Response(200, json=[{k: v for k, v in self.torrent.items() if k != "files"}] if mine else [])
         if path == "torrents/files":
-            if not self.torrent or request.url.params["hash"] != T.infohash:
+            if not self.torrent or request.url.params["hash"] != self.t.infohash:
                 return httpx.Response(404)
             return httpx.Response(200, json=self.torrent["files"])
         if path == "torrents/add":
             tags = request.content.split(b'name="tags"\r\n\r\n', 1)[1].split(b"\r\n", 1)[0].decode()
-            self.load(tags, on=range(len(T.files)))                      # qBittorrent adds with every file on
+            assert b"4:name%d:%s" % (len(self.t.name), self.t.name.encode()) in request.content   # the set's own
+            self.load(tags, on=range(len(self.t.files)))                 # qBittorrent adds with every file on
             return httpx.Response(200, text="Ok.")
         if path == "torrents/filePrio":
             for i in form["id"][0].split("|"):
@@ -260,8 +410,8 @@ class FakeQBit:
         if path == "torrents/start":
             return httpx.Response(200)
         if path == "torrents/delete":
-            assert form["hashes"] == [T.infohash] and form["deleteFiles"] == ["true"]
-            self.deleted.append(T.infohash)
+            assert form["hashes"] == [self.t.infohash] and form["deleteFiles"] == ["true"]
+            self.deleted.append(self.t.infohash)
             self.torrent = None
             return httpx.Response(200)
         return httpx.Response(404)
@@ -281,27 +431,29 @@ class Env:
         self.packages = packages.Packages(self.db, self.config / "psn-keys.txt", self.config / "package-manuals",
                                           self.data, lambda: QBit("http://qbit", "u", "p"))
 
-    def keys(self):
+    def keys(self, psp=True):
+        """The key file; without the names for PSP packages, it is the one from before there were any."""
         self.config.mkdir(parents=True, exist_ok=True)
         (self.config / "psn-keys.txt").write_text(
-            "".join(f"{n} = {k.hex()}\n" for n, k in KEYS.pkg) +
+            "".join(f"{n} = {k.hex()}\n" for n, k in KEYS.pkg + (KEYS.psp if psp else ())) +
             f"document_key = {KEYS.document_key.hex()}\ndocument_iv = {KEYS.document_iv.hex()}\n")
 
-    def ready(self):
+    def ready(self, rom="1", kind="ps1", psp=True):
         """The key file is there and the set's list is loaded."""
-        self.keys()
-        assert self.post("open", rom="1").status_code == 303
+        self.keys(psp)
+        assert self.post("open", rom=rom, kind=kind).status_code == 303
         return self
 
     def post(self, what, **data):
-        return self.c.post(f"/manuals/psn/{what}", data=data, follow_redirects=False)
+        """Press one of the section's buttons; the page's form names the set (PS one Classics unless said)."""
+        return self.c.post(f"/manuals/psn/{what}", data={"kind": "ps1", **data}, follow_redirects=False)
 
     def said(self, r) -> str:
         return unquote(r.headers["location"])
 
     def arrive(self, idx: int, pkg: bytes | None):
         """qBittorrent finished the file."""
-        zipped(self.data / "torrents" / T.files[idx].path, pkg)
+        zipped(self.data / "torrents" / self.fake.t.files[idx].path, pkg)
         self.fake.file(idx)["progress"] = 1.0
 
     def round(self):
@@ -325,6 +477,7 @@ def env(tmp_path):
             def upload(request, rom_id):
                 data = request.content.split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n--", 1)[0]
                 e.uploads.append((int(rom_id), data))
+                (e.res / f"roms/9/{rom_id}/manual").mkdir(parents=True, exist_ok=True)
                 (e.res / f"roms/9/{rom_id}/manual/{rom_id}.pdf").write_bytes(data)
                 return httpx.Response(201)
 
@@ -341,6 +494,8 @@ def env(tmp_path):
                 "metadata": {"title": "Made-up manuals"}, "files": [{"name": "Other Game.pdf", "source": "original", "size": "9"}]}))
             e.index = router.get(mv.CDN).mock(return_value=httpx.Response(200, text=INDEX))
             e.set_file = router.get(url__regex=r".*\(PSN\)\.torrent$").mock(return_value=httpx.Response(200, content=TORRENT))
+            e.psp_file = router.get(url__regex=r".*\(Encrypted\)\.torrent$").mock(
+                return_value=httpx.Response(200, content=PSP_TORRENT))
             router.route(host="qbit").mock(side_effect=e.fake.handle)
             made.append(e)
             return e
@@ -444,7 +599,7 @@ def test_a_torrent_added_for_manuals_stays_while_anything_else_uses_it(env):
 
     e.post("fetch", rom="3", idx="4")
     e.db.execute("INSERT INTO jobs(set_name, idx, path, size, infohash, state, created_at, updated_at)"
-                 " VALUES (?, 3, 'x', 1, ?, 'sent', 'now', 'now')", (packages.SET, T.infohash))
+                 " VALUES (?, 3, 'x', 1, ?, 'sent', 'now', 'now')", (packages.PS1.name, T.infohash))
     e.arrive(4, package(GAME))
     e.round()
     assert e.row(4)["state"] == "none" and not e.fake.deleted             # sent from the set's own page: kept
@@ -505,7 +660,87 @@ def test_a_package_that_left_qbittorrent_or_was_switched_off_is_marked(env):
 
 def test_a_list_that_changed_since_the_page_was_made_sends_nothing(env):
     e = env().ready()
-    e.db.execute("UPDATE files SET path='PS one Classics/Renamed (Japan).zip' WHERE set_name=? AND idx=0", (packages.SET,))
+    e.db.execute("UPDATE files SET path='PS one Classics/Renamed (Japan).zip' WHERE set_name=? AND idx=0",
+                 (packages.PS1.name,))
     r = e.post("fetch", rom="1", idx="0")
     assert "Minerva changed the set" in e.said(r) and "torrents/add" not in e.fake.calls and e.row() is None
     assert "wasn't sent" in e.said(e.post("fetch", rom="1", idx="nonsense"))
+
+
+# ------------------------------------------------------------------ the PSP set
+def test_a_psp_game_s_package_is_read_and_its_manual_goes_into_romm(env):
+    e = env(FakeQBit(t=PT))
+    e.keys()
+    page = e.page(4)
+    assert "In PSP PlayStation Store packages" in page and "In PS one Classics packages" not in page
+    assert 'name="kind" value="psp"' in page and 'formaction="/manuals/psn/open"' in page
+    assert "No such set" in e.said(e.post("open", rom="4", kind="vita")) and not e.index.called
+    assert "no such set" in e.said(e.post("fetch", rom="4", kind="", idx="0"))
+    assert e.said(e.post("open", rom="4", kind="psp")) == "/manuals/g/4"
+    assert e.psp_file.call_count == 1 and not e.set_file.called           # only the set that was asked for
+    page = e.page(4)
+    assert "Hoshi no Fune (Japan).zip" in page and "(USA)" not in page and "Moon Garden" not in page
+    assert page.count('formaction="/manuals/psn/fetch"') == 1
+
+    r = e.post("fetch", rom="4", kind="psp", idx="0")
+    assert "qBittorrent is fetching the package" in e.said(r)
+    assert e.fake.torrent["tags"] == "hakobiya,hakobiya-manual" and e.fake.on() == [0]
+    row = e.row()
+    assert (row["set_name"], row["state"]) == (packages.PSP.name, "downloading")
+    assert row["path"] == "PSP packages/Hoshi no Fune (Japan).zip"
+    e.arrive(0, psp_with_manual())
+    e.round()
+    row = e.row()
+    assert (row["state"], row["pages"], row["note"]) == ("ready", 3, None) and e.fake.deleted == [PT.infohash]
+    page = e.page(4)
+    assert f'name="pick" value=":psn-psp/{row["id"]}"' in page and "3 pages" in page
+    look = e.c.get(f"/manuals/psn/{row['id']}")
+    assert len(PdfReader(io.BytesIO(look.content)).pages) == 3 and not e.uploads
+
+    r = e.c.post("/manuals/apply", data={"rom": "4", "pick": f":psn/{row['id']}"}, follow_redirects=False)
+    assert "Fetch the package again" in e.said(r) and not e.uploads      # not a package of the PS one Classics set
+    r = e.c.post("/manuals/apply", data={"rom": "4", "pick": f":psn-psp/{row['id']}"}, follow_redirects=False)
+    assert "is in RomM" in e.said(r) and e.uploads == [(4, look.content)]
+    change = e.db.one("SELECT * FROM manual_changes")
+    assert (change["identifier"], change["file"]) == (":psn-psp", "Hoshi no Fune (Japan).zip")
+    assert "PSP PlayStation Store package" in e.page(4) and "PSP PlayStation Store package" in e.c.get("/manuals").text
+
+
+def test_each_platform_s_page_offers_only_its_own_set(env):
+    e = env().ready()
+    assert e.post("open", rom="4", kind="psp").status_code == 303
+    assert e.set_file.call_count == 1 and e.psp_file.call_count == 1 and e.index.call_count == 1
+    ps1, psp = e.page(1), e.page(4)                                       # both sets have a package under each title
+    assert "In PS one Classics packages" in ps1 and "PSP PlayStation Store" not in ps1
+    assert 'name="kind" value="ps1"' in ps1
+    assert ps1.count('formaction="/manuals/psn/fetch"') == 2 and "572.2 MB" in ps1 and "858.3 MB" not in ps1
+    assert "In PSP PlayStation Store packages" in psp and "PS one Classics" not in psp
+    assert psp.count('formaction="/manuals/psn/fetch"') == 1 and "858.3 MB" in psp and "572.2 MB" not in psp
+    assert "PlayStation Store" not in e.page(2)                           # a platform without a set
+    r = e.post("fetch", rom="4", kind="psp", idx="5")                     # the other set's package of that title
+    assert "no such package" in e.said(r) and not e.db.all("SELECT 1 FROM package_manuals")
+    e.post("fetch", rom="1", idx="0")
+    assert e.row()["set_name"] == packages.PS1.name and "on its way" not in e.page(4)
+
+
+def test_a_key_file_with_only_the_ps_one_names_keeps_the_psp_set_out(env):
+    e = env(FakeQBit(t=PT)).ready(rom="4", kind="psp")
+    e.post("fetch", rom="4", kind="psp", idx="0")
+    e.keys(psp=False)                                                     # the key file as it was before PSP packages
+    page = e.page(4)
+    assert "doesn't have what these packages need yet" in page and "/manuals/psn/" not in page
+    assert all(name in page for name, _ in KEYS.psp) and "pkg_psp" not in page
+    assert all(value.hex() not in page for _, value in KEYS.psp + KEYS.pkg)
+    assert "psn-keys.txt has no kirk_38, kirk_39" in e.said(e.post("fetch", rom="4", kind="psp", idx="0"))
+    assert e.fake.calls.count("torrents/add") == 1
+    e.arrive(0, psp_with_manual())                                        # the one asked for before the keys went
+    e.round()
+    row = e.row()
+    assert row["state"] == "failed" and "has no kirk_38" in row["note"] and "still in qBittorrent" in row["note"]
+    assert not e.fake.deleted
+    ps1 = e.page(1)                                                       # PlayStation games are offered as before
+    assert 'formaction="/manuals/psn/open"' in ps1 and "need yet" not in ps1
+    e.keys()
+    e.post("fetch", rom="4", kind="psp", idx="0")
+    e.round()
+    assert e.row()["state"] == "ready" and e.fake.deleted == [PT.infohash]

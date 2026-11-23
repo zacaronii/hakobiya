@@ -48,7 +48,8 @@ class ArchiveError(RuntimeError):
 
 
 # ------------------------------------------------------------------ what a game has now
-OTHER_SOURCES = {":psn": "PS one Classics package"}    # manual_changes.identifier values that aren't Archive items
+# manual_changes.identifier values that aren't Archive items
+OTHER_SOURCES = {":psn": "PS one Classics package", ":psn-psp": "PSP PlayStation Store package"}
 
 
 def source_label(identifier: str) -> str:

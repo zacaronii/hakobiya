@@ -147,8 +147,18 @@ The originals in `/data/torrents/Minerva_Myrient/...` are **never modified or mo
     page, any other file on or downloaded), and never after a failed read. Nothing is ever switched off in a
     torrent that stays.
   - The PDF is written here (each page's pixels as they are, a point a pixel), so nothing is recompressed.
-- Not done: items with only page images (no PDF); the manuals inside PSP packages (another key scheme) and 3DS
-  ROMs.
+- **PSP packages (0.10.0):** the same for PSP games, out of Minerva's encrypted PSP PlayStation Store set.
+  Decisions:
+  - The sets are a small table in `packages.py` (Minerva's set, the RomM folders, the kind of manual); a game's
+    page offers its own platform's set only, and a manual that went into RomM is recorded under its set's source.
+  - A PSP manual is under a key of its own, which the package's `DOCINFO.EDAT` holds: a PGD under fixed keys of
+    the PSP's key engine. Those are further names in the same key file; the PSP set is offered only when all of
+    them are there, and a key file with only the PS one names works as it did.
+  - What tells that the keys fit is the PGD's check of its data table, then the manual's `DOC `. The checksums
+    inside `DOCUMENT.DAT` and the PGD header's check under its fixed key aren't read: they would need three more
+    keys, and a page that isn't a picture is refused anyway.
+  - So far read only out of packages built for the tests, laid out the way a real package was found to be.
+- Not done: items with only page images (no PDF); the manuals inside 3DS ROMs.
 
 ## Decisions
 
