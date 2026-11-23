@@ -2,10 +2,11 @@
 
 RomM takes a game's manual from ScreenScraper, which has a Japanese one for only some games: the rest have another
 region's or none. The Internet Archive holds scans of many Japanese manuals, as single items and as collections of
-PDFs. Hakobiya searches it by a game's titles, lists the PDFs of what it finds, and shows one for a look; nothing
-goes into RomM until the owner picks a PDF. The manual it replaces is kept for "Put back".
+PDFs or of page images. Hakobiya searches it by a game's titles, lists the PDFs and the uploader's own page images
+(a Comic Book ZIP or a zip, made into a PDF here by `scans.py`) of what it finds, and shows one for a look; nothing
+goes into RomM until the owner picks one. The manual it replaces is kept for "Put back".
 
-Only archive.org is asked: its search, an item's file list, and the PDF that was picked. Requests go one at a time
+Only archive.org is asked: its search, an item's file list, and the file that was picked. Requests go one at a time
 with a pause between them, and the answers are cached."""
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 
-from . import __version__
+from . import __version__, scans as page_scans
 from .db import DB
 from .regions import region_of
 
@@ -31,12 +32,14 @@ SEARCH_TTL = 7 * 86400
 ITEM_TTL = 30 * 86400
 CACHE_DAYS = 7                       # a PDF fetched for a look and never used
 CACHE_SIZE = 2 * 1024 ** 3           # all of them together: the oldest go first
-MAX_SIZE = 300 * 1024 * 1024
+MAX_SIZE = 300 * 1024 * 1024            # a PDF
+MAX_SCANS = 200 * 1024 * 1024           # an archive of page images (a manual's is a few MB)
+SCAN_ARCHIVES = (".cbz", ".zip")        # only the uploader's own ("original"): the Archive's _jp2.zip is reworked
 ROWS = 12
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 MANUAL_WORDS = "manual OR manuals OR scan OR scans OR booklet OR 説明書 OR マニュアル"
 
-# Collections of Japanese manuals with one PDF per game, by RomM platform slug. Their files are matched by name.
+# Collections of Japanese manuals with one PDF or archive of page images per game, by RomM platform slug. Their files are matched by name.
 PACKS = {
     "psx": ["gamemanuals-psinstructionmanual", "psone-classics-manuals-japan"],
     "psp": ["phantasy-star-portable-2-infinity"],
@@ -110,10 +113,10 @@ def key(text: str) -> str:
 
 
 def file_keys(filename: str) -> set[str]:
-    """The titles in a collection's file name. They come as `Title.pdf`, `Title (o).pdf`, `Title (o)_text.pdf`
-    and `日本語の題 (Romaji Title).pdf`."""
+    """The titles in a collection's file name. They come as `Title.pdf`, `Title (o).pdf`, `Title (o)_text.pdf`,
+    `日本語の題 (Romaji Title).pdf`, and the same with `.cbz`, `.zip` or `_jp2.zip` for page images."""
     stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-    stem = re.sub(r"_text$", "", stem)
+    stem = re.sub(r"_(text|jp2)$", "", stem)
     stem = re.sub(r"\s*\(o\)$", "", stem)
     parts = [stem] + re.findall(r"\(([^()]+)\)", stem) + [re.sub(r"\s*\([^()]*\)", "", stem)]
     return {key(p) for p in parts if len(key(p)) >= 2}
@@ -170,6 +173,7 @@ class Archive:
         self.db, self.cache_dir, self.pause = db, cache_dir, pause
         self.http = client or httpx.AsyncClient(timeout=httpx.Timeout(60, read=120), headers={"User-Agent": USER_AGENT})
         self.turn = asyncio.Lock()          # one request at a time
+        self.making = asyncio.Lock()        # one archive of page images made into a PDF at a time
         self.last = 0.0
 
     async def _wait(self) -> None:
@@ -223,37 +227,60 @@ class Archive:
         return json.loads(row["body"]) if row else None
 
     async def item(self, identifier: str, fresh: bool = False) -> dict:
-        """An item's PDFs: {identifier, title, japanese, pdfs: [{name, size, original}], images}."""
+        """An item's manuals: {identifier, title, japanese, scans: [{name, size, files, original, scans}],
+        pdfs: [{name, size, original}], images}. `scans` are the uploader's own archives of page images; the PDFs
+        come the uploader's first, then the ones the Archive made."""
         if not IDENTIFIER.fullmatch(identifier):
             raise ArchiveError("That isn't an Internet Archive item name.")
         cache_key = "item:" + identifier
         cached, body = await self._json(cache_key, ITEM_TTL, f"{ARCHIVE}/metadata/{identifier}", None, fresh)
+        if cached is not None and "scans" not in cached:        # kept before archives of page images were listed
+            try:
+                cached, body = await self._json(cache_key, ITEM_TTL, f"{ARCHIVE}/metadata/{identifier}", None, True)
+            except ArchiveError:
+                return {**cached, "scans": []}
         if cached is not None:
             return cached
         if not isinstance(body, dict) or not body.get("files"):
             raise ArchiveError(f"The Internet Archive has no item named {identifier}.")
         meta = body.get("metadata") or {}
         files = [f for f in body["files"] if isinstance(f, dict) and isinstance(f.get("name"), str)]
-        pdfs = [{"name": f["name"], "size": int(f["size"]) if str(f.get("size", "")).isdigit() else None,
-                 "original": f.get("source") == "original"} for f in files if f["name"].lower().endswith(".pdf")]
-        pdfs.sort(key=lambda f: (f["name"].casefold(), not f["original"]))
+
+        def number(value) -> int | None:
+            return int(value) if str(value or "").isdigit() else None
+
+        pdfs = [{"name": f["name"], "size": number(f.get("size")), "original": f.get("source") == "original"}
+                for f in files if f["name"].lower().endswith(".pdf")]
+        pdfs.sort(key=lambda f: (not f["original"], f["name"].casefold()))
+        archives = [{"name": f["name"], "size": number(f.get("size")), "files": number(f.get("filecount")),
+                     "original": True, "scans": True}
+                    for f in files if f.get("source") == "original" and f["name"].lower().endswith(SCAN_ARCHIVES)]
+        archives.sort(key=lambda f: f["name"].casefold())
         images = sum(1 for f in files if f.get("source") == "original"
                      and f["name"].lower().endswith((".jpg", ".jpeg", ".png", ".tif", ".tiff", ".jp2", ".webp")))
         found = {"identifier": identifier, "title": first(meta.get("title")) or identifier,
-                 "japanese": is_japanese(meta.get("language")), "pdfs": pdfs, "images": images}
+                 "japanese": is_japanese(meta.get("language")), "scans": archives, "pdfs": pdfs, "images": images}
         self._keep(cache_key, found)
         return found
 
     async def in_packs(self, slug: str, names: list[str]) -> list[dict]:
-        """PDFs for a game in the platform's collections: [{identifier, title, match, name, size, original}]."""
+        """Manuals for a game in the platform's collections: [{identifier, title, match, name, size, original,
+        scans?, files?}], the same titles first, then the uploader's page images, PDFs, and the Archive's PDFs."""
         out = []
         for identifier in PACKS.get(slug, []):
             pack = await self.item(identifier)
-            for f in pack["pdfs"]:
+            for f in pack["scans"] + pack["pdfs"]:
                 match = name_match(names, f["name"])
                 if match:
                     out.append({"identifier": identifier, "title": pack["title"], "match": match, **f})
-        return sorted(out, key=lambda f: f["match"] != "same")
+        return sorted(out, key=lambda f: (f["match"] != "same", not f.get("scans"), not f["original"]))
+
+    def pages(self, identifier: str, name: str) -> int | None:
+        """How many pages an archive of page images came to, while its PDF is in the cache; asks nothing."""
+        if not self._path(identifier, name).is_file():
+            return None
+        row = self.db.one("SELECT body FROM manual_cache WHERE key=?", (f"pages:{identifier}/{name}",))
+        return json.loads(row["body"]) if row else None
 
     def _path(self, identifier: str, name: str) -> Path:
         return self.cache_dir / (hashlib.sha1(f"{identifier}/{name}".encode()).hexdigest()[:24] + ".pdf")
@@ -283,24 +310,49 @@ class Archive:
         self._path(identifier, name).unlink(missing_ok=True)
 
     async def fetch(self, identifier: str, name: str) -> Path:
-        """The PDF `name` of an item, in Hakobiya's cache. Only a file the item lists is fetched, only from
-        archive.org's own hosts, and only if it is a PDF no larger than MAX_SIZE."""
+        """The manual `name` of an item as a PDF in Hakobiya's cache. Only a file the item lists is fetched, only
+        from archive.org's own hosts: a PDF no larger than MAX_SIZE, or the uploader's archive of page images no
+        larger than MAX_SCANS, which is made into a PDF here and not kept."""
         item = await self.item(identifier)
-        listed = next((f for f in item["pdfs"] if f["name"] == name), None)
+        archive = next((f for f in item.get("scans", []) if f["name"] == name), None)
+        listed = archive or next((f for f in item["pdfs"] if f["name"] == name), None)
         if listed is None:
-            raise ArchiveError("That item has no such PDF.")
-        if listed["size"] and listed["size"] > MAX_SIZE:
-            raise ArchiveError(f"That PDF is larger than {MAX_SIZE // 2**20} MB.")
+            raise ArchiveError("That item has no such PDF or page images.")
+        what, limit = ("That archive of page images", MAX_SCANS) if archive else ("That PDF", MAX_SIZE)
+        if listed["size"] and listed["size"] > limit:
+            raise ArchiveError(f"{what} is larger than {limit // 2**20} MB.")
         path = self._path(identifier, name)
         if path.is_file():
             return path
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.sweep()
+        if not archive:
+            await self._download(identifier, name, path, limit, what, b"%PDF-", 1024)
+            return path
+        async with self.making:                 # one at a time, so the same pages aren't fetched twice
+            if path.is_file():
+                return path
+            raw = path.with_suffix(".download")
+            try:
+                await self._download(identifier, name, raw, limit, what, b"PK", 2)
+                try:
+                    pages = await asyncio.to_thread(page_scans.make_pdf, raw, path)
+                except page_scans.ScanError as e:
+                    raise ArchiveError(f"The page images couldn't be made into a PDF: {e}.") from None
+            finally:
+                raw.unlink(missing_ok=True)
+        self._keep(f"pages:{identifier}/{name}", pages)
+        return path
+
+    async def _download(self, identifier: str, name: str, path: Path, limit: int, what: str, magic: bytes,
+                        within: int) -> None:
+        """Fetch an item's file to `path`, refusing it when `magic` isn't within its first `within` bytes."""
         part = path.with_suffix(".part")
         url = f"{ARCHIVE}/download/{identifier}/{quote(name)}"
+        kind = "a PDF" if magic == b"%PDF-" else "a zip archive"
         async with self.turn:
             if path.is_file():                      # fetched while this request waited its turn
-                return path
+                return
             await self._wait()
             try:
                 for _ in range(6):                  # the Archive redirects a download to the host that has the file
@@ -316,17 +368,17 @@ class Archive:
                         with part.open("wb") as out:
                             async for chunk in r.aiter_bytes(1 << 16):
                                 size += len(chunk)
-                                if size > MAX_SIZE:
-                                    raise ArchiveError(f"That PDF is larger than {MAX_SIZE // 2**20} MB.")
-                                if len(head) < 1024:    # a PDF's header is within its first 1024 bytes
-                                    head += chunk[:1024 - len(head)]
-                                    if len(head) == 1024 and b"%PDF-" not in head:
-                                        raise ArchiveError("That file isn't a PDF.")
+                                if size > limit:
+                                    raise ArchiveError(f"{what} is larger than {limit // 2**20} MB.")
+                                if len(head) < within:
+                                    head += chunk[:within - len(head)]
+                                    if len(head) == within and magic not in head:
+                                        raise ArchiveError(f"That file isn't {kind}.")
                                 out.write(chunk)
-                        if b"%PDF-" not in head:
-                            raise ArchiveError("That file isn't a PDF.")
+                        if magic not in head:
+                            raise ArchiveError(f"That file isn't {kind}.")
                         part.replace(path)
-                        return path
+                        return
                 raise ArchiveError("Too many redirects from the Internet Archive.")
             except httpx.HTTPError as e:
                 raise ArchiveError(f"The download from the Internet Archive failed ({type(e).__name__}).") from e

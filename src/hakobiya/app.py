@@ -839,6 +839,10 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
                 found.sort(key=lambda f: not f["japanese"])
         except ArchiveError as e:
             err = err or str(e)
+        scans = [(f["identifier"], f) for f in packs if f.get("scans")]        # page counts of those made already
+        scans += [(it["identifier"], f) for it in found for f in it.get("scans") or []]
+        for identifier, f in scans:
+            f["pages"] = archive.pages(identifier, f["name"])
         label, japanese = manual_now(r, manual_changes())
         changes = [dict(c) for c in db.all("SELECT * FROM manual_changes WHERE rom_id=? ORDER BY id DESC", (rom_id,))]
         return render(request, "manuals_game.html", rom=r, game=r.get("name") or r["fs_name"], state=label,
@@ -881,7 +885,8 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
 
     @app.get("/manuals/file/{identifier}/{name:path}")
     async def manuals_file(identifier: str, name: str):
-        """A PDF from the Internet Archive for a look: the same cached file that would go into RomM."""
+        """A PDF from the Internet Archive for a look, or the uploader's page images made into one: the same cached
+        file that would go into RomM."""
         try:
             return document(await archive.fetch(identifier, name))
         except ArchiveError as e:
@@ -966,7 +971,7 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
         try:
             r = await need_romm().rom(rom_id)
             if not name:
-                raise ArchiveError("No PDF was ticked.")
+                raise ArchiveError("No manual was ticked.")
             package_set = psn.set_by(source=identifier)
             if package_set:
                 pdf = packages.pdf(int(name), package_set) if name.isdigit() else None

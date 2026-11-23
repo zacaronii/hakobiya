@@ -158,7 +158,15 @@ The originals in `/data/torrents/Minerva_Myrient/...` are **never modified or mo
     inside `DOCUMENT.DAT` and the PGD header's check under its fixed key aren't read: they would need three more
     keys, and a page that isn't a picture is refused anyway.
   - So far read only out of packages built for the tests, laid out the way a real package was found to be.
-- Not done: items with only page images (no PDF); the manuals inside 3DS ROMs.
+- **Original scans (0.11.0, `scans.py`):** the uploader's own `.cbz`/`.zip` of page images is offered before the
+  Archive's PDFs, which are its derivatives and heavily compressed. Decisions:
+  - Only files the item marks `original`; the Archive's `_jp2.zip` is reworked as well and isn't offered.
+  - The archive is read in memory, entry by entry, with limits (entries, pages, bytes per page and in all, pixels
+    per page, the PDF's size); names pointing outside it (absolute, `..`) or encrypted entries refuse the archive.
+  - One PDF writer (`pdf.py`) for packages and scans: JPEG pages are put in as they are (DCTDecode), others as
+    deflated pixels; a point a pixel. The packages' PDFs come out byte for byte as before.
+  - `.cbr` is left out: RAR needs an unrar tool the image doesn't have.
+- Not done: items with only loose page images (no archive, no PDF); the manuals inside 3DS ROMs.
 
 ## Decisions
 

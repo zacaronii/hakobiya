@@ -44,6 +44,7 @@ try:                                              # cryptography 43 moved the ol
 except ImportError:                               # pragma: no cover
     TripleDES = algorithms.TripleDES
 
+from . import pdf
 from .db import DB
 from .manuals import name_match
 from .minerva import utcnow
@@ -318,9 +319,7 @@ def pages_of(document: bytes, key: bytes, iv: bytes, kind: str = "ps1") -> list[
 def write_pdf(pages: list[bytes], out: Path) -> None:
     """One PDF page per PNG, a point a pixel, the pixels kept as they are (deflated, not JPEG): the scans are
     small and their text is fine."""
-    objects: list[bytes] = [b"", b""]                # 1: the catalog, 2: the page list
-    kids = []
-    for png in pages:
+    def picture(png: bytes) -> pdf.Picture:
         try:
             with Image.open(io.BytesIO(png)) as im:
                 if max(im.size) > MAX_SIDE:
@@ -332,29 +331,9 @@ def write_pdf(pages: list[bytes], out: Path) -> None:
                 (w, h), pixels = im.size, zlib.compress(im.convert("RGB").tobytes(), 9)
         except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as e:
             raise PackageError(f"a page can't be read as a picture ({e})") from None
-        n = len(objects) + 1                         # this page's object number; its picture and drawing follow
-        kids.append(n)
-        draw = f"q {w} 0 0 {h} 0 0 cm /P Do Q".encode()
-        objects += [
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Resources << /XObject << /P {n + 1} 0 R >> >>"
-            f" /Contents {n + 2} 0 R >>".encode(),
-            f"<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8"
-            f" /Filter /FlateDecode /Length {len(pixels)} >>\nstream\n".encode() + pixels + b"\nendstream",
-            f"<< /Length {len(draw)} >>\nstream\n".encode() + draw + b"\nendstream"]
-    objects[0] = b"<< /Type /Catalog /Pages 2 0 R >>"
-    objects[1] = f"<< /Type /Pages /Count {len(kids)} /Kids [{' '.join(f'{k} 0 R' for k in kids)}] >>".encode()
-    body, offsets = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"), []
-    for number, obj in enumerate(objects, start=1):
-        offsets.append(len(body))
-        body += f"{number} 0 obj\n".encode() + obj + b"\nendobj\n"
-    xref = len(body)
-    body += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
-    body += b"".join(f"{o:010d} 00000 n \n".encode() for o in offsets)
-    body += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    part = out.with_suffix(".part")
-    part.write_bytes(body)
-    part.replace(out)
+        return pdf.Picture(w, h, "/DeviceRGB", "/FlateDecode", pixels)
+
+    pdf.write(out, len(pages), (picture(png) for png in pages))
 
 
 def manual_pdf(zip_path: Path, keys: Keys, out: Path, kind: str = "ps1") -> int:

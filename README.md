@@ -39,7 +39,7 @@ RomM in the right format.
   timer. The manual RomM had is kept in `/config/manual-backup` with "Put back"; a game that had none gets its
   manual taken out again. Only archive.org is contacted, one request at a time; search answers are kept for a
   week and file lists for a month. A PDF fetched for a look is kept for a week at most (`/config/manual-cache`,
-  2 GB at most). Items that hold only page images aren't turned into a manual yet.
+  2 GB at most). Items that hold only loose page images aren't turned into a manual yet (but see 0.11.0).
 - **Manuals out of PlayStation Store packages (PS one Classics 0.9.0, PSP 0.10.0):** Sony's PS one Classics
   release of a game carries its manual (PNG pages, 480 pixels wide: readable, not sharp), and a PSP game's package
   can carry one the same way. On a PlayStation or PSP game's manual page, "Fetch the package" has qBittorrent
@@ -60,6 +60,15 @@ RomM in the right format.
   nothing was sent from the set's own page, and no other file in it is switched on or downloaded. Otherwise, or
   when the set already was in qBittorrent, nothing is removed or switched off, and the page says so. A package
   that couldn't be read stays for "Try again"; "Stop" gives one up under the same rule.
+- **Original scans (0.11.0):** in some items, the collections among them, the uploader's own file for a manual is a
+  Comic Book ZIP (`.cbz`) or a `.zip` of page images, and the only PDF is the one the Archive made of it, which is
+  heavily compressed and can be hard to read. Such an archive is now listed first, as "original scans" (its size
+  before, its page count after a look); the Archive's PDFs are listed after it as "the Archive's compressed copy".
+  "Look at it" fetches the archive (200 MB at most, same rules as a PDF) and makes a PDF of its pages in name order
+  (page2 before page10), a point a pixel: JPEG pages go in as they are, byte for byte; PNG, WebP, TIFF and JPEG 2000
+  pages are stored losslessly. The archive itself isn't kept, only the PDF, in the same cache as fetched PDFs.
+  Ticking and Put back work as for any other manual. `.cbr` (RAR) archives aren't read: that would need an unrar
+  tool in the image.
 - Plan and house rules for Minerva access: [PLAN.md](PLAN.md).
 
 Run: `python -m hakobiya` (env: `HAKOBIYA_CONFIG`, `ROMM_LIBRARY`, `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD`,
