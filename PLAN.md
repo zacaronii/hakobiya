@@ -126,6 +126,18 @@ The originals in `/data/torrents/Minerva_Myrient/...` are **never modified or mo
 - The six-hourly check is opt-in (`HAKOBIYA_REGION_CHECK=1`), in line with "never automatic" above, until the owner
   says otherwise. Manuals and screenshots aren't covered (they aren't `ss_metadata` paths).
 
+## Manuals (2026-11-23)
+
+- The owner wants Japanese manuals. ScreenScraper has one for some games only, and RomM takes another region's
+  when there is no Japanese one. No other metadata provider has them; the scans that exist are on the Internet
+  Archive, as single items and as a few collections (`manuals.py`: `PACKS`).
+- **Never automatic**, like box art: a search per game on request, a look at the PDF, and only the ticked PDF is
+  uploaded (RomM's own manual upload, so it counts as "uploaded" there). The manual a game had is kept, with "Put
+  back"; if an upload fails, the old manual is put back at once (RomM removes the file when an upload fails).
+- Access: archive.org only (the search, an item's file list, its PDFs; redirects are followed only to
+  archive.org's own hosts), one request at a time with a pause, a User-Agent that names Hakobiya, answers cached.
+- Not done: items with only page images (no PDF); the manuals inside PSN packages and 3DS ROMs.
+
 ## Decisions
 
 - **Login:** Authentik forward auth (above), with a basic login as the fallback.

@@ -11,13 +11,14 @@ import json
 import logging
 import math
 import os
+import shutil
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -29,6 +30,7 @@ from .qbit import QBit, QBitError, QBitView
 from .art import ODD_SHAPE, REPOS, Libretro, cover_source, image_size, lookup_names
 from . import make as maker
 from .genuine import Keeper, ScreenScraper, status_of
+from .manuals import Archive, ArchiveError, game_names, item_link, manual_state, search_terms, sha256_of
 from .processor import Processor
 from .regions import MEDIA, RegionKeeper, inside
 from .romm import Romm, RommError
@@ -56,6 +58,7 @@ class Settings:
     screenscraper: dict | None = None   # RomM's ScreenScraper login, for the weekly genuine-scan check
     region_check: bool = False     # take non-Japanese spines, backs etc. out of RomM every six hours, unasked
     public_url: str = ""           # the address people open (through the proxy), named when a direct request is refused
+    archive_pause: float = 1.0     # seconds between two requests to the Internet Archive
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -745,6 +748,187 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
         db.execute("UPDATE make_changes SET undone_at=? WHERE id=?", (utcnow().isoformat(), change_id))
         return RedirectResponse(f"/make/p/{c['platform_id']}?show=all&msg={quote('Previous disc/cart art put back.')}",
                                 status_code=303)
+
+    # ------------------------------------------------------------- manuals (Japanese ones from the Internet Archive)
+    archive = Archive(db, s.config_dir / "manual-cache", pause=s.archive_pause)
+    manual_backups = s.config_dir / "manual-backup"
+
+    def manual_file(r: dict) -> Path | None:
+        """The game's manual as RomM saved it, read from RomM's resources folder."""
+        path = inside(s.romm_resources, r["path_manual"]) if r.get("path_manual") else None
+        return path if path and path.is_file() else None
+
+    def manual_changes() -> dict[int, dict]:
+        """Hakobiya's latest standing manual change per game."""
+        rows = db.all("SELECT * FROM manual_changes WHERE undone_at IS NULL ORDER BY id")
+        return {c["rom_id"]: dict(c) for c in rows}
+
+    def manual_now(r: dict, changes: dict[int, dict]) -> tuple[str, bool]:
+        """(label, Japanese) for a game's manual; Hakobiya's own only while RomM's file still has its size."""
+        change, path = changes.get(r["id"]), manual_file(r)
+        if change and (path is None or path.stat().st_size != change["size"]):
+            change = None
+        return manual_state(r, change)
+
+    def document(path: Path | None) -> Response:
+        if path is None or not path.is_file():
+            raise HTTPException(404, "no such manual")
+        pdf = path.suffix.lower() == ".pdf"
+        return FileResponse(path, media_type="application/pdf" if pdf else "text/plain; charset=utf-8",
+                            content_disposition_type="inline", filename="manual" + path.suffix.lower(),
+                            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
+
+    @app.get("/manuals", response_class=HTMLResponse)
+    async def manuals_index(request: Request, msg: str = "", err: str = ""):
+        try:
+            platforms = await need_romm().platforms()
+            changes, rows = manual_changes(), []
+            for p in sorted(platforms, key=lambda p: p.get("display_name") or p["name"]):
+                states = [manual_now(r, changes) for r in await romm.roms(p["id"])]
+                rows.append({**p, "games": len(states), "missing": sum(1 for l, _ in states if l == "no manual"),
+                             "not_jp": sum(1 for l, jp in states if l != "no manual" and not jp),
+                             "japanese": sum(1 for _, jp in states if jp)})
+        except RommError as e:
+            return render(request, "error.html", message=f"RomM isn't answering: {e}")
+        recent = [dict(r) for r in db.all("SELECT * FROM manual_changes ORDER BY id DESC LIMIT 20")]
+        return render(request, "manuals.html", platforms=rows, changes=recent, msg=msg, err=err)
+
+    @app.get("/manuals/p/{platform_id}", response_class=HTMLResponse)
+    async def manuals_platform(request: Request, platform_id: int, show: str = "todo"):
+        try:
+            platform = next((p for p in await need_romm().platforms() if p["id"] == platform_id), None)
+            if platform is None:
+                raise HTTPException(404, "no such platform")
+            roms = await romm.roms(platform_id)
+        except RommError as e:
+            return render(request, "error.html", message=f"RomM isn't answering: {e}")
+        changes, games = manual_changes(), []
+        for r in sorted(roms, key=lambda r: (r.get("name") or r["fs_name"]).casefold()):
+            label, japanese = manual_now(r, changes)
+            if show == "all" or not japanese:
+                games.append({"id": r["id"], "name": r.get("name") or r["fs_name"], "fs_name": r["fs_name"],
+                              "state": label, "japanese": japanese})
+        return render(request, "manuals_platform.html", platform=platform, games=games, show=show, total=len(roms))
+
+    @app.get("/manuals/g/{rom_id}", response_class=HTMLResponse)
+    async def manuals_game(request: Request, rom_id: int, q: str = "", wide: bool = False, fresh: bool = False,
+                           item: str = "", msg: str = "", err: str = ""):
+        try:
+            r = await need_romm().rom(rom_id)
+        except RommError as e:
+            return render(request, "error.html", message=f"RomM isn't answering: {e}")
+        terms = [t.strip() for t in q.split(";") if t.strip()] or search_terms(r)
+        link, packs, found = item_link(q), [], []
+        try:
+            if link:
+                found = [await archive.item(link)]
+            else:
+                packs = await archive.in_packs(r.get("platform_fs_slug") or "", game_names(r))
+                found = await archive.search(terms, not wide, fresh)
+                opened = await archive.item(item) if item else None
+                found = [opened if opened and opened["identifier"] == f["identifier"] else
+                         {**f, **(archive.known(f["identifier"]) or {})} for f in found]
+                if opened and all(f["identifier"] != opened["identifier"] for f in found):
+                    found.insert(0, opened)
+                found.sort(key=lambda f: not f["japanese"])
+        except ArchiveError as e:
+            err = err or str(e)
+        label, japanese = manual_now(r, manual_changes())
+        changes = [dict(c) for c in db.all("SELECT * FROM manual_changes WHERE rom_id=? ORDER BY id DESC", (rom_id,))]
+        return render(request, "manuals_game.html", rom=r, game=r.get("name") or r["fs_name"], state=label,
+                      japanese=japanese, has_file=manual_file(r) is not None, q="; ".join(terms) if not link else q,
+                      wide=wide, packs=packs, found=found, link=link, changes=changes, msg=msg, err=err)
+
+    @app.get("/manuals/current/{rom_id}")
+    async def manuals_current(rom_id: int):
+        return document(manual_file(await need_romm().rom(rom_id)))
+
+    @app.get("/manuals/kept/{change_id}")
+    async def manuals_kept(change_id: int):
+        c = db.one("SELECT backup_path FROM manual_changes WHERE id=?", (change_id,))
+        return document(Path(c["backup_path"]) if c and c["backup_path"] else None)
+
+    @app.get("/manuals/file/{identifier}/{name:path}")
+    async def manuals_file(identifier: str, name: str):
+        """A PDF from the Internet Archive for a look: the same cached file that would go into RomM."""
+        try:
+            return document(await archive.fetch(identifier, name))
+        except ArchiveError as e:
+            raise HTTPException(502, str(e))
+
+    async def put_manual(r: dict, pdf: Path, backup: Path | None) -> None:
+        """Upload `pdf` as the game's manual. RomM writes over the manual it had and deletes the file when an
+        upload breaks off, so if the old one is gone after a failure, the kept copy goes back."""
+        try:
+            await romm.upload_manual(r["id"], pdf)
+        except RommError as e:
+            old = manual_file(r)
+            if backup is None or (old and old.stat().st_size == backup.stat().st_size):
+                raise
+            try:
+                await romm.upload_manual(r["id"], backup)
+            except RommError:
+                raise RommError(f"{e}. RomM's old manual couldn't be put back either; Hakobiya's copy is {backup}") from e
+            raise RommError(f"{e}. The manual RomM had was put back") from e
+
+    @app.post("/manuals/apply")
+    async def manuals_apply(request: Request):
+        form = await request.form()
+        rom_id = int(form.get("rom", 0))
+        identifier, _, name = str(form.get("pick", "")).partition("/")
+        back = f"/manuals/g/{rom_id}"
+        try:
+            r = await need_romm().rom(rom_id)
+            if not name:
+                raise ArchiveError("No PDF was ticked.")
+            pdf = await archive.fetch(identifier, name)
+            was, _ = manual_now(r, manual_changes())
+            old, backup = manual_file(r), None
+            if r.get("path_manual") and old is None:
+                raise ArchiveError("RomM's manual for this game can't be read from its resources folder, so it "
+                                   "couldn't be kept for Put back. Nothing was changed.")
+            if old:
+                manual_backups.mkdir(parents=True, exist_ok=True)
+                backup = manual_backups / f"{rom_id}-{utcnow().strftime('%Y%m%dT%H%M%S')}{old.suffix.lower()}"
+                await asyncio.to_thread(shutil.copy2, old, backup)
+            digest, size = await asyncio.to_thread(sha256_of, pdf), pdf.stat().st_size
+            await put_manual(r, pdf, backup)
+            db.execute("INSERT INTO manual_changes(rom_id, platform_id, name, identifier, file, sha256, size, old_state,"
+                       " backup_path, applied_at, applied_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                       (rom_id, r.get("platform_id") or 0, r.get("name") or r["fs_name"], identifier, name, digest, size,
+                        was, str(backup) if backup else None, utcnow().isoformat(),
+                        request.headers.get("x-authentik-username")))
+            archive.forget(identifier, name)
+        except (RommError, ArchiveError, OSError) as e:
+            return RedirectResponse(f"{back}?err={quote(str(e)[:500])}", status_code=303)
+        note = "The manual is in RomM." + (" The one it had is kept: Put back restores it." if backup else "")
+        return RedirectResponse(f"{back}?msg={quote(note)}", status_code=303)
+
+    @app.post("/manuals/undo/{change_id}")
+    async def manuals_undo(change_id: int):
+        c = db.one("SELECT * FROM manual_changes WHERE id=? AND undone_at IS NULL", (change_id,))
+        if c is None:
+            raise HTTPException(404, "nothing to undo")
+        back = f"/manuals/g/{c['rom_id']}"
+        try:
+            r = await need_romm().rom(c["rom_id"])
+            now = manual_file(r)
+            if r.get("path_manual") and now is None:
+                raise ArchiveError("RomM's manual for this game can't be read from its resources folder. Nothing was changed.")
+            if now and (now.stat().st_size != c["size"] or await asyncio.to_thread(sha256_of, now) != c["sha256"]):
+                raise ArchiveError("The manual in RomM isn't the one Hakobiya put there any more, so it was left as it is.")
+            backup = Path(c["backup_path"]) if c["backup_path"] else None
+            if backup:
+                if not backup.is_file():
+                    raise ArchiveError("Hakobiya's copy of the old manual is gone. Nothing was changed.")
+                await romm.upload_manual(c["rom_id"], backup)
+            elif now:
+                await romm.delete_manual(c["rom_id"])
+            db.execute("UPDATE manual_changes SET undone_at=? WHERE id=?", (utcnow().isoformat(), change_id))
+        except (RommError, ArchiveError, OSError) as e:
+            return RedirectResponse(f"{back}?err={quote(str(e)[:500])}", status_code=303)
+        note = "The manual RomM had before is back." if backup else "The manual was taken out again (the game had none before)."
+        return RedirectResponse(f"{back}?msg={quote(note)}", status_code=303)
 
     return app
 
