@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}{{ game }} manual · Hakobiya{% endblock %}
+{% macro pdf_row(identifier, f, note="") %}
+  <tr>
+    <td class="name"><label style="white-space:normal"><input type="radio" name="pick" value="{{ identifier }}/{{ f.name }}" required>
+      {{ f.name }}</label>{% if note %} <span class="chip">{{ note }}</span>{% endif %}</td>
+    <td class="num mono muted">{{ f.size|human if f.size else "" }}</td>
+    <td class="muted">{{ "as uploaded" if f.original else "made by the Archive" }}</td>
+    <td><a href="/manuals/file/{{ identifier }}/{{ f.name|urlencode }}" target="_blank">Look at it</a></td>
+  </tr>
+{% endmacro %}
+{% block main %}
+<p class="sub"><a href="/manuals">Manuals</a> / <a href="/manuals/p/{{ rom.platform_id }}">{{ rom.platform_fs_slug }}</a></p>
+<h1>{{ game }}</h1>
+<p class="sub"><span class="mono">{{ rom.fs_name }}</span> · in RomM now:
+  <span class="chip {{ 'ok' if japanese else 'stamp' if state == 'no manual' else 'warn' }}">{{ state }}</span>
+  {% if has_file %}<a href="/manuals/current/{{ rom.id }}" target="_blank">open it</a>{% endif %}</p>
+{% if msg %}<div class="banner ok">{{ msg }}</div>{% endif %}
+{% if err %}<div class="banner">{{ err }}</div>{% endif %}
+
+<form class="filters" method="get">
+  <input type="search" name="q" value="{{ q }}" aria-label="Titles to look for" style="width:min(640px,100%)">
+  <label><input type="checkbox" name="wide" value="true" {% if wide %}checked{% endif %}> also items not called a manual or scan</label>
+  <button>Search</button>
+  <button class="ghost" name="fresh" value="true">Ask the Archive again</button>
+</form>
+<p class="sub">Titles are separated with ";". An item's address (archive.org/details/…) lists that item's PDFs.
+  Answers are kept for a week.</p>
+
+<form method="post" action="/manuals/apply" id="applyform">
+<input type="hidden" name="rom" value="{{ rom.id }}">
+<div class="basket">
+  <span>Look at a PDF, then tick it. {% if has_file %}The manual RomM has now is kept for Put back.{% endif %}</span>
+  <button id="applybtn" disabled>Put the ticked manual into RomM</button>
+</div>
+
+{% if packs %}
+<h2>In collections of Japanese manuals</h2>
+<div class="panel"><table>
+  {% for f in packs %}{{ pdf_row(f.identifier, f, "same title" if f.match == "same" else "similar title") }}{% endfor %}
+</table></div>
+{% endif %}
+
+<h2>{{ "The item" if link else "Found on the Internet Archive" }}</h2>
+{% for it in found %}
+<div class="panel" style="margin-bottom:10px"><table>
+  <tr><th colspan="4" style="text-transform:none;letter-spacing:0;font-size:14px">
+    <a href="https://archive.org/details/{{ it.identifier }}" target="_blank" rel="noreferrer">{{ it.title }}</a>
+    {% if it.japanese %}<span class="chip ok">Japanese</span>{% endif %}
+    <span class="mono muted">{{ it.identifier }}</span></th></tr>
+  {% if it.pdfs is defined %}
+    {% for f in it.pdfs[:40] %}{{ pdf_row(it.identifier, f) }}{% endfor %}
+    {% if it.pdfs|length > 40 %}<tr><td colspan="4" class="muted">…and {{ it.pdfs|length - 40 }} more PDFs: open the item on archive.org to find the one.</td></tr>{% endif %}
+    {% if not it.pdfs %}<tr><td colspan="4" class="muted">No PDF in this item{% if it.images %}: {{ it.images }} page images, which Hakobiya can't turn into a manual yet{% endif %}.</td></tr>{% endif %}
+  {% else %}
+  <tr><td colspan="4"><a href="?q={{ q|urlencode }}{% if wide %}&amp;wide=true{% endif %}&amp;item={{ it.identifier }}">Show its files</a></td></tr>
+  {% endif %}
+</table></div>
+{% else %}
+<p class="muted">{% if err %}No answer to show.{% else %}Nothing found under these titles. Try a shorter title, the Japanese one, or tick "also items not called a manual or scan".{% endif %}</p>
+{% endfor %}
+</form>
+
+{% if changes %}
+<h2>Manuals Hakobiya put into RomM for this game</h2>
+<div class="panel"><table>
+  {% for c in changes %}
+  <tr><td class="name">{{ c.file }}<br><span class="mono muted">{{ c.identifier }}</span></td>
+      <td class="muted">before: {{ c.old_state }}{% if c.backup_path %} · <a href="/manuals/kept/{{ c.id }}" target="_blank">open the kept one</a>{% endif %}</td>
+      <td class="mono muted">{{ c.applied_at[:16].replace("T", " ") }}</td>
+      <td>{% if c.undone_at %}<span class="chip">put back</span>{% else %}
+        <form method="post" action="/manuals/undo/{{ c.id }}"><button class="ghost" style="padding:2px 10px;font-size:12px">Put back</button></form>{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+
+<script>
+(() => {
+  const form = document.getElementById("applyform"), btn = document.getElementById("applybtn");
+  form.addEventListener("change", () => { btn.disabled = !form.querySelector("input[name=pick]:checked"); });
+  form.addEventListener("submit", () => { btn.disabled = true; btn.textContent = "Uploading…"; });
+})();
+</script>
+{% endblock %}

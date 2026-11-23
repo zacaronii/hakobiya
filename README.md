@@ -32,6 +32,14 @@ RomM in the right format.
   disc/cartridge images and logos go only when ticked. Each removed file is kept in `/config/media-backup` with
   "Put back", and an image put back is left alone afterwards. `HAKOBIYA_REGION_CHECK=1` runs the check every six
   hours as well (off unless set).
+- **Manuals (0.8.0):** the Manuals tab. Per RomM platform: what each game's manual is now (none, Japanese, from
+  another region, uploaded). For one game it searches the Internet Archive under the game's titles (the Japanese
+  one first) and looks the game up in a few collections of Japanese manual scans; an item's address can be pasted
+  too. "Look at it" opens a PDF, and only the PDF you tick goes into RomM. Nothing is fetched or changed on a
+  timer. The manual RomM had is kept in `/config/manual-backup` with "Put back"; a game that had none gets its
+  manual taken out again. Only archive.org is contacted, one request at a time; search answers are kept for a
+  week and file lists for a month. A PDF fetched for a look is kept for a week at most (`/config/manual-cache`,
+  2 GB at most). Items that hold only page images aren't turned into a manual yet.
 - Plan and house rules for Minerva access: [PLAN.md](PLAN.md).
 
 Run: `python -m hakobiya` (env: `HAKOBIYA_CONFIG`, `ROMM_LIBRARY`, `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD`,

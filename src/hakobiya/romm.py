@@ -1,8 +1,10 @@
-"""RomM API (bearer token): platforms, games and their covers, and uploading a cover (RomM locks an uploaded one)."""
+"""RomM API (bearer token): platforms, games and their covers, and uploading a cover or a manual (RomM locks an
+uploaded one, so a later scan leaves it)."""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
@@ -64,3 +66,22 @@ class Romm:
         if r.status_code != 200:
             raise RommError(f"RomM cover upload for #{rom_id}: HTTP {r.status_code} {r.text[:200]}")
         return r.json()
+
+    async def upload_manual(self, rom_id: int, path: Path) -> None:
+        """Make the file at `path` the game's manual. RomM stores it as `<rom id><ext>` in place of the one it had;
+        it reads the file from the form field named like the `x-upload-filename` header."""
+        filename = "manual" + path.suffix.lower()
+        try:
+            with path.open("rb") as f:
+                r = await self.http.post(f"{self.url}/api/roms/{rom_id}/manuals",
+                                         headers={"x-upload-filename": filename},
+                                         files={filename: (filename, f, "application/octet-stream")})
+        except httpx.HTTPError as e:
+            raise RommError(f"RomM manual upload for #{rom_id}: {type(e).__name__}") from e
+        if r.status_code not in (200, 201):
+            raise RommError(f"RomM manual upload for #{rom_id}: HTTP {r.status_code} {r.text[:200]}")
+
+    async def delete_manual(self, rom_id: int) -> None:
+        r = await self.http.delete(f"{self.url}/api/roms/{rom_id}/manuals")
+        if r.status_code not in (200, 204):
+            raise RommError(f"RomM manual removal for #{rom_id}: HTTP {r.status_code} {r.text[:200]}")

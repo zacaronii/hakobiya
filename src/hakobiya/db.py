@@ -60,6 +60,15 @@ SCHEMA = [
         kind TEXT NOT NULL, region TEXT NOT NULL, path TEXT NOT NULL, backup_path TEXT, removed_at TEXT NOT NULL,
         removed_by TEXT, undone_at TEXT);
     """,
+    # v8: manuals: the Internet Archive's answers (searches, items' file lists) and manuals put into RomM (the old
+    # file kept for undo; sha256 and size are the uploaded file's, to tell whether it is still the one in RomM)
+    """
+    CREATE TABLE manual_cache (key TEXT PRIMARY KEY, fetched_at REAL NOT NULL, body TEXT NOT NULL);
+    CREATE TABLE manual_changes (
+        id INTEGER PRIMARY KEY, rom_id INTEGER NOT NULL, platform_id INTEGER NOT NULL, name TEXT NOT NULL,
+        identifier TEXT NOT NULL, file TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL,
+        old_state TEXT NOT NULL, backup_path TEXT, applied_at TEXT NOT NULL, applied_by TEXT, undone_at TEXT);
+    """,
 ]
 
 

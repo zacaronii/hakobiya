@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ platform.display_name or platform.name }} manuals · Hakobiya{% endblock %}
+{% block main %}
+<p class="sub"><a href="/manuals">Manuals</a> / {{ platform.fs_slug }}</p>
+<h1>{{ platform.display_name or platform.name }}</h1>
+<form class="filters" method="get">
+  <fieldset><legend>Show</legend>
+    <label><input type="radio" name="show" value="todo" {% if show != "all" %}checked{% endif %}> without a Japanese manual</label>
+    <label><input type="radio" name="show" value="all" {% if show == "all" %}checked{% endif %}> all {{ total }}</label>
+  </fieldset>
+  <button>Show</button>
+</form>
+<div class="panel">
+<table>
+  <tr><th>Game</th><th>Manual in RomM</th></tr>
+  {% for g in games %}
+  <tr>
+    <td class="name"><a href="/manuals/g/{{ g.id }}">{{ g.name }}</a><br><span class="mono muted">{{ g.fs_name }}</span></td>
+    <td><span class="chip {{ 'ok' if g.japanese else 'stamp' if g.state == 'no manual' else 'warn' }}">{{ g.state }}</span></td>
+  </tr>
+  {% else %}
+  <tr><td colspan="2" class="muted">Every game on this platform has a Japanese manual.</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% endblock %}
