@@ -847,17 +847,20 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
                       psn=await package_rows(r))
 
     async def package_rows(r: dict) -> dict | None:
-        """What the game's page says about PS one Classics packages; None on other platforms' pages."""
-        if r.get("platform_fs_slug") not in psn.SLUGS:
+        """What the game's page says about its platform's set of packages; None where no set is the platform's."""
+        s = psn.set_for(r.get("platform_fs_slug"))
+        if s is None:
             return None
+        about = {"kind": s.kind, "label": s.label, "source": s.source, "key_file": packages.key_file.name}
         try:
-            if packages.keys() is None:
-                return {"keys": False, "key_file": packages.key_file.name}
+            keys = packages.keys()
         except psn.PackageError as e:
-            return {"keys": False, "key_file": packages.key_file.name, "problem": str(e)}
-        if not packages.loaded():
-            return {"keys": True, "loaded": False}
-        files = packages.matches(game_names(r))
+            return {**about, "keys": False, "problem": str(e)}
+        if keys is None or keys.missing(s.kind):
+            return {**about, "keys": False, "missing": keys.missing(s.kind) if keys else []}
+        if not packages.loaded(s):
+            return {**about, "keys": True, "loaded": False}
+        files = packages.matches(s, game_names(r))
         for f in files:
             if f["row"] and f["row"]["state"] == "downloading":
                 try:
@@ -865,7 +868,7 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
                     f["percent"] = math.floor(got["progress"] * 100) if got else None
                 except (QBitError, OSError):
                     f["percent"] = None
-        return {"keys": True, "loaded": True, "files": files, "source": psn.SOURCE}
+        return {**about, "keys": True, "loaded": True, "files": files}
 
     @app.get("/manuals/current/{rom_id}")
     async def manuals_current(rom_id: int):
@@ -884,7 +887,8 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
         except ArchiveError as e:
             raise HTTPException(502, str(e))
 
-    # manuals inside PS one Classics packages: a package is fetched only when its button is pressed
+    # manuals inside PlayStation Store packages: a package is fetched only when its button is pressed; the page's
+    # form says which set (`kind`)
     def psn_back(form, msg: str = "", err: str = "") -> RedirectResponse:
         rom = str(form.get("rom", ""))
         note = f"?msg={quote(msg)}" if msg else f"?err={quote(err[:500])}" if err else ""
@@ -894,12 +898,15 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
     async def manuals_psn_open(request: Request):
         """Load the set's file list (its .torrent from Minerva's CDN, once), as opening the set's own page does."""
         form = await request.form()
+        s = psn.set_by(kind=str(form.get("kind", "")))
+        if s is None:
+            return psn_back(form, err="No such set of packages. Reload the page and try again.")
         try:
-            if db.one("SELECT 1 FROM sets WHERE name=?", (psn.SET,)) is None:
+            if db.one("SELECT 1 FROM sets WHERE name=?", (s.name,)) is None:
                 await minerva.refresh_index()
-            await minerva.open_set(psn.SET)
+            await minerva.open_set(s.name)
         except KeyError:
-            return psn_back(form, err="Minerva's index doesn't list the PS one Classics set.")
+            return psn_back(form, err=f"Minerva's index doesn't list the {s.label} set.")
         except (httpx.HTTPError, RuntimeError, ValueError, OSError) as e:
             return psn_back(form, err=f"The set's list couldn't be loaded from Minerva: {e}")
         return psn_back(form)
@@ -907,9 +914,12 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
     @app.post("/manuals/psn/fetch")
     async def manuals_psn_fetch(request: Request):
         form = await request.form()
-        idx = str(form.get("idx", ""))
+        idx, s = str(form.get("idx", "")), psn.set_by(kind=str(form.get("kind", "")))
+        user = request.headers.get("x-authentik-username")
         try:
-            await packages.ask(minerva, int(idx) if idx.isdigit() else -1, request.headers.get("x-authentik-username"))
+            if s is None:
+                raise psn.PackageError("no such set of packages. Reload the page and try again")
+            await packages.ask(minerva, s, int(idx) if idx.isdigit() else -1, user)
         except (psn.PackageError, QBitError, httpx.HTTPError, KeyError, ValueError, OSError) as e:
             return psn_back(form, err=f"The package wasn't sent to qBittorrent: {e}")
         qview.forget()
@@ -957,8 +967,9 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
             r = await need_romm().rom(rom_id)
             if not name:
                 raise ArchiveError("No PDF was ticked.")
-            if identifier == psn.SOURCE:
-                pdf = packages.pdf(int(name)) if name.isdigit() else None
+            package_set = psn.set_by(source=identifier)
+            if package_set:
+                pdf = packages.pdf(int(name), package_set) if name.isdigit() else None
                 if pdf is None:
                     raise ArchiveError("That package's manual isn't here any more. Fetch the package again.")
                 name = packages.name_of(int(name))
@@ -980,7 +991,7 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
                        (rom_id, r.get("platform_id") or 0, r.get("name") or r["fs_name"], identifier, name, digest, size,
                         was, str(backup) if backup else None, utcnow().isoformat(),
                         request.headers.get("x-authentik-username")))
-            if identifier != psn.SOURCE:
+            if not package_set:
                 archive.forget(identifier, name)
         except (RommError, ArchiveError, OSError) as e:
             return RedirectResponse(f"{back}?err={quote(str(e)[:500])}", status_code=303)

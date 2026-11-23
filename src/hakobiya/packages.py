@@ -1,20 +1,28 @@
-"""Manuals out of PS one Classics packages.
+"""Manuals out of PlayStation Store packages.
 
 Sony's PS one Classics release of a game carries the game's manual: `DOCUMENT.DAT` inside the package, a list of
-PNG pages (480 pixels wide). Minerva's set of these packages is a torrent like any other, so a package is fetched
-through qBittorrent (only that file switched on), read, and the manual saved as a PDF for the Manuals page, where
-it is looked at and ticked like one from the Internet Archive. Never automatic: a package is fetched only when
-asked for on a game's page.
+PNG pages (480 pixels wide). A PSP game's package can carry one the same way. Minerva's sets of these packages are
+torrents like any other, so a package is fetched through qBittorrent (only that file switched on), read, and the
+manual saved as a PDF for the Manuals page, where it is looked at and ticked like one from the Internet Archive.
+Never automatic: a package is fetched only when asked for on a game's page.
 
-The package and the manual are encrypted with fixed keys. They are not in this repository: Hakobiya reads them
-from `psn-keys.txt` in its config folder, and the feature stays off without that file.
+The packages and the manuals are encrypted with fixed keys. They are not in this repository: Hakobiya reads them
+from `psn-keys.txt` in its config folder, and the feature stays off without that file. The PSP set is offered
+when the file also has the names only PSP packages need.
 
 Layout, as read here:
 - the zip holds one `.pkg`: a 0x100-byte header (magic, item count, where the data starts, the IV), then the data,
   AES-128-CTR from its start: the item table (32 bytes an item), the names, the files;
 - `DOCUMENT.DAT`: 16 bytes of an empty PGD header, then DES-CBC parts, each from the same IV: a 0x60-byte header
   (`DOC `, version, game code, page-limit exponent), the page table (0x80 bytes a page: offset, size), and per
-  page a 0x20-byte head, a table of the page's encrypted parts, and the PNG with only those parts encrypted."""
+  page a 0x20-byte head, a table of the page's encrypted parts, and the PNG with only those parts encrypted.
+  Checksums follow the header, the table and each page: 0x20 bytes in a PS one Classics package, 0x30 in a PSP
+  one. They are skipped, not checked;
+- a PS one Classics manual is under one fixed DES key. A PSP one is under its own, XORed with a fixed constant,
+  and that key is what `DOCINFO.EDAT` next to it holds: 0x80 bytes of an EDAT header, then a PGD (the PSP's wrap
+  for encrypted, checked data) of one 16-byte block. The PGD's own key is taken back out of its header check; the
+  data's key and description (0x30 to 0x60) and the data (0x90) are under the fixed AES keys 0x38, 0x39 and 0x63
+  of the PSP's key engine; the check of the data's table (0x60) tells whether the keys fit."""
 
 from __future__ import annotations
 
@@ -28,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.cmac import CMAC
 from PIL import Image
 
 try:                                              # cryptography 43 moved the old ciphers
@@ -42,11 +51,30 @@ from .qbit import QBitError
 from .sender import TAG as SENT_TAG, send
 
 log = logging.getLogger(__name__)
-SET = "No-Intro - Sony - PlayStation (PS one Classics) (PSN)"
-SLUGS = {"psx"}                         # RomM platform folders whose games the set's packages are
-SOURCE = ":psn"                         # stands where an Internet Archive item's name does; never a valid one
+
+
+@dataclass(frozen=True)
+class PackageSet:
+    kind: str                           # how its manuals are encrypted; a page's form names the set by it too
+    name: str                           # Minerva's set
+    slugs: frozenset[str]               # RomM platform folders whose games the set's packages are
+    source: str                         # stands where an Internet Archive item's name does; never a valid one
+    label: str
+
+
+PS1 = PackageSet("ps1", "No-Intro - Sony - PlayStation (PS one Classics) (PSN)", frozenset({"psx"}), ":psn",
+                 "PS one Classics")
+PSP = PackageSet("psp", "No-Intro - Sony - PlayStation Portable (PSN) (Encrypted)", frozenset({"psp"}), ":psn-psp",
+                 "PSP PlayStation Store")
+SETS = (PS1, PSP)
 TAG = "hakobiya-manual"                 # on a torrent Hakobiya added only to read manuals out of it
-KEY_NAMES = {"pkg_psp": 16, "pkg_ps3": 16, "document_key": 8, "document_iv": 8}
+KEY_NAMES = {"pkg_psp": 16, "pkg_ps3": 16, "document_key": 8, "document_iv": 8,
+             "kirk_38": 16, "kirk_39": 16, "kirk_63": 16, "pgd_mac_xor": 16, "pgd_seed_xor": 16, "pgd_stream_xor": 16,
+             "document_xor": 8}
+NEEDS = {"ps1": (),                     # by kind: the names its packages need on top of the file's first four
+         "psp": ("pkg_psp", "kirk_38", "kirk_39", "kirk_63", "pgd_mac_xor", "pgd_seed_xor", "pgd_stream_xor",
+                 "document_xor")}
+TAIL = {"ps1": 0x20, "psp": 0x30}       # by kind: the checksums after each part of a manual
 PKG_MAGIC = b"\x7fPKG"
 PGD_EMPTY = b"\0PGD\1\0\0\0\1\0\0\0\0\0\0\0"
 PNG = b"\x89PNG\r\n\x1a\n"
@@ -55,6 +83,7 @@ INFO_SIZE = {0: 0x31e8, 1: 0x1f3e8}     # by the header's page-limit exponent: 9
 MAX_ITEMS = 4096
 MAX_NAMES = 4 * 1024 * 1024
 MAX_DOCUMENT = 256 * 1024 * 1024
+MAX_EDAT = 4096
 MAX_SIDE = 4096
 
 
@@ -62,11 +91,28 @@ class PackageError(RuntimeError):
     pass
 
 
+def set_for(slug: str | None) -> PackageSet | None:
+    """The set whose packages are a RomM platform folder's games."""
+    return next((s for s in SETS if slug in s.slugs), None)
+
+
+def set_by(**field: str) -> PackageSet | None:
+    """The set with this `kind`, `name` or `source`."""
+    (attr, value), = field.items()
+    return next((s for s in SETS if getattr(s, attr) == value), None)
+
+
 @dataclass(frozen=True)
 class Keys:
     pkg: tuple[tuple[str, bytes], ...]   # (name, AES key) of the package keys the file has
     document_key: bytes
     document_iv: bytes
+    psp: tuple[tuple[str, bytes], ...] = ()   # (name, value) of what the file has of the names PSP packages need
+
+    def missing(self, kind: str) -> list[str]:
+        """The names a kind of package needs that the key file doesn't have."""
+        have = dict(self.pkg + self.psp)
+        return [n for n in NEEDS[kind] if n not in have]
 
 
 def load_keys(path: Path) -> Keys | None:
@@ -91,7 +137,8 @@ def load_keys(path: Path) -> Keys | None:
     pkg = tuple((n, found[n]) for n in ("pkg_psp", "pkg_ps3") if n in found)
     if not pkg or "document_key" not in found or "document_iv" not in found:
         raise PackageError(f"{path.name} needs pkg_psp (or pkg_ps3), document_key and document_iv")
-    return Keys(pkg, found["document_key"], found["document_iv"])
+    psp = tuple((n, found[n]) for n in NEEDS["psp"] if n in found and n != "pkg_psp")
+    return Keys(pkg, found["document_key"], found["document_iv"], psp)
 
 
 # ------------------------------------------------------------------ the package
@@ -122,8 +169,9 @@ class Forward:
         return data
 
 
-def document_of(zip_path: Path, keys: Keys) -> bytes | None:
-    """The package's DOCUMENT.DAT, decrypted out of the package; None when the package has none."""
+def files_of(zip_path: Path, keys: Keys, wanted: dict[str, int]) -> dict[str, bytes]:
+    """The package's files with these names (in capitals, without their folders; each with the most bytes it may
+    have), decrypted out of the package. A name the package doesn't have is left out."""
     with zipfile.ZipFile(zip_path) as z:
         member = next((i for i in z.infolist() if i.filename.lower().endswith(".pkg")), None)
         if member is None:
@@ -151,19 +199,25 @@ def document_of(zip_path: Path, keys: Keys) -> bytes | None:
                 raise PackageError("the package's file names are out of place")
             raw += src.at(data_off + items * 32, end + (-end) % 16 - items * 32)
             plain = {name: ctr(key, iv, 0, raw) for name, key in keys.pkg}
+            found: dict[str, tuple[int, int, str]] = {}
             for name_off, name_size, off, size, flags, _ in entries:
                 # each item says which key it is under; the other one is tried too
                 order = sorted(plain, key=lambda n: (n == "pkg_psp") != (flags >> 24 == 0x90))
                 names = [plain[n][name_off:name_off + name_size] for n in order]
                 which = next((n for n, text in zip(order, names) if text and all(32 <= b < 127 for b in text)), None)
-                if which is None or plain[which][name_off:name_off + name_size].decode().rsplit("/", 1)[-1].upper() \
-                        != "DOCUMENT.DAT":
+                if which is None:
                     continue
-                if not 0 < size <= MAX_DOCUMENT or off % 16:
-                    raise PackageError("the package's manual has a size or place Hakobiya doesn't read")
+                name = plain[which][name_off:name_off + name_size].decode().rsplit("/", 1)[-1].upper()
+                if name not in wanted or name in found:
+                    continue
+                if not 0 < size <= wanted[name] or off % 16:
+                    raise PackageError(f"the package's {name} has a size or place Hakobiya doesn't read")
+                found[name] = (off, size, which)
+            out = {}
+            for name, (off, size, which) in sorted(found.items(), key=lambda item: item[1]):   # as they lie
                 body = src.at(data_off + off, size + (-size) % 16)
-                return ctr(dict(keys.pkg)[which], iv, off, body)[:size]
-    return None
+                out[name] = ctr(dict(keys.pkg)[which], iv, off, body)[:size]
+    return out
 
 
 # ------------------------------------------------------------------ the manual
@@ -171,24 +225,66 @@ def u32(data: bytes, offset: int) -> int:
     return struct.unpack_from("<I", data, offset)[0]
 
 
-def pages_of(document: bytes, keys: Keys) -> list[bytes]:
+def xor(a: bytes, b: bytes) -> bytes:
+    return bytes(x ^ y for x, y in zip(a, b))
+
+
+def aes(key: bytes, data: bytes, encrypt: bool = False) -> bytes:
+    """AES-128-CBC from an IV of zeros, the way the PSP's key engine runs its fixed keys."""
+    c = Cipher(algorithms.AES(key), modes.CBC(bytes(16)))
+    return (c.encryptor() if encrypt else c.decryptor()).update(bytes(data))
+
+
+def document_key(edat: bytes, keys: Keys) -> bytes:
+    """The DES key of a PSP package's manual, out of the package's `DOCINFO.EDAT`."""
+    k = dict(keys.psp)
+    lacks = [n for n in NEEDS["psp"] if n != "pkg_psp" and n not in k]
+    if lacks:
+        raise PackageError(f"the key file has no {', '.join(lacks)}")
+    p = edat[0x80:]
+    if len(p) < 0xb0 or edat[:8] != b"\0PSPEDAT" or u32(edat, 0x0c) != 0x80 or p[:4] != b"\0PGD" or \
+            (u32(p, 4), u32(p, 8)) != (1, 1):
+        raise PackageError("the package's DOCINFO.EDAT is of a kind Hakobiya doesn't read")
+
+    def mac(data: bytes) -> bytes:
+        c = CMAC(algorithms.AES(k["kirk_38"]))
+        c.update(data)
+        return xor(c.finalize(), k["pgd_mac_xor"])
+
+    def unbox(data: bytes, seed: bytes) -> bytes:
+        t = xor(aes(k["kirk_39"], xor(xor(seed, own), k["pgd_seed_xor"])), k["pgd_stream_xor"])
+        counters = b"".join(t[:12] + struct.pack("<I", 1 + i) for i in range(len(data) // 16))
+        return xor(data, aes(k["kirk_63"], counters))
+
+    own = xor(mac(p[:0x70]), aes(k["kirk_38"], p[0x70:0x80]))        # the PGD's own key, out of its header check
+    inner = unbox(p[0x30:0x60], p[0x10:0x20])                        # the data's key, then what the data is like
+    size, block, off = struct.unpack_from("<III", inner, 0x14)
+    # one 8-byte key in one block at 0x90, its table of one check after it; wrong keys give anything here
+    if (size, off) != (8, 0x90) or block < 16 or aes(k["kirk_38"], xor(mac(p[0xa0:0xb0]), own), True) != p[0x60:0x70]:
+        raise PackageError("the PSP keys don't open the package's DOCINFO.EDAT, or the file is damaged")
+    return xor(unbox(p[0x90:0xa0], inner[:16])[:size], k["document_xor"])
+
+
+def pages_of(document: bytes, key: bytes, iv: bytes, kind: str = "ps1") -> list[bytes]:
     """The manual's pages as PNG files, in order."""
     def des(data: bytes) -> bytes:
         if len(data) % 8:
             raise PackageError("a part of the manual has a length that can't be decrypted")
-        d = Cipher(TripleDES(keys.document_key * 3), modes.CBC(keys.document_iv)).decryptor()   # single DES
+        d = Cipher(TripleDES(key * 3), modes.CBC(iv)).decryptor()    # single DES
         return d.update(bytes(data)) + d.finalize()
 
-    if document[:16] != PGD_EMPTY or len(document) < 16 + 0x80:
-        raise PackageError("the manual doesn't start like a PS one Classics manual")
+    tail = TAIL[kind]
+    if document[:16] != PGD_EMPTY or len(document) < 16 + 0x60 + tail:
+        raise PackageError("the manual doesn't start like a package's manual")
     b = document[16:]
     head = des(b[:0x60])
     if head[:4] != b"DOC ":
-        raise PackageError("the document key doesn't open this manual")
+        raise PackageError("the document key doesn't open this manual" if kind == "ps1" else
+                           "the key in the package's DOCINFO.EDAT doesn't open this manual")
     size = INFO_SIZE.get(u32(head, 0x1c))
-    if size is None or len(b) < 0x80 + size:
+    if size is None or len(b) < 0x60 + tail + size:
         raise PackageError("the manual's page table is of a kind Hakobiya doesn't read")
-    info = des(b[0x80:0x80 + size])
+    info = des(b[0x60 + tail:0x60 + tail + size])
     count = u32(info, 4)
     if info[:4] != b"\xff\xff\xff\xff" or 8 + count * 0x80 > size:
         raise PackageError("the manual's page table can't be read")
@@ -198,10 +294,10 @@ def pages_of(document: bytes, keys: Keys) -> list[bytes]:
         off, n = u32(entry, 0), u32(entry, 12)
         if not off:
             continue
-        page = document[off:off + n]                 # ends with 0x20 bytes of checksums
-        if len(page) != n or n < 0x60:
+        page = document[off:off + n]                 # ends with its checksums
+        if len(page) != n or n < 0x40 + tail:
             raise PackageError(f"page {i + 1} lies outside the manual")
-        page = page[:-0x20]
+        page = page[:-tail]
         parts = u32(des(page[:0x20]), 8)
         if 0x20 + parts * 8 > len(page):
             raise PackageError(f"page {i + 1} can't be read")
@@ -261,13 +357,19 @@ def write_pdf(pages: list[bytes], out: Path) -> None:
     part.replace(out)
 
 
-def manual_pdf(zip_path: Path, keys: Keys, out: Path) -> int:
+def manual_pdf(zip_path: Path, keys: Keys, out: Path, kind: str = "ps1") -> int:
     """Write the package's manual to `out`; the number of pages, 0 when the package has no manual."""
+    wanted = {"DOCUMENT.DAT": MAX_DOCUMENT} | ({"DOCINFO.EDAT": MAX_EDAT} if kind == "psp" else {})
     try:
-        document = document_of(zip_path, keys)
+        files = files_of(zip_path, keys, wanted)
     except (zipfile.BadZipFile, struct.error, zlib.error, EOFError) as e:
         raise PackageError(f"the package can't be read ({e})") from None
-    pages = pages_of(document, keys) if document else []
+    document, key = files.get("DOCUMENT.DAT"), keys.document_key
+    if document and kind == "psp":
+        if "DOCINFO.EDAT" not in files:
+            raise PackageError("the package has a manual, but not the DOCINFO.EDAT that holds its key")
+        key = document_key(files["DOCINFO.EDAT"], keys)
+    pages = pages_of(document, key, keys.document_iv, kind) if document else []
     if pages:
         write_pdf(pages, out)
     return len(pages)
@@ -283,55 +385,58 @@ class Packages:
     def keys(self) -> Keys | None:
         return load_keys(self.key_file)
 
-    def loaded(self) -> bool:
+    def loaded(self, s: PackageSet) -> bool:
         """Whether the set's file list is here (someone opened the set, here or on its own page)."""
-        row = self.db.one("SELECT file_count FROM sets WHERE name=?", (SET,))
+        row = self.db.one("SELECT file_count FROM sets WHERE name=?", (s.name,))
         return bool(row and row["file_count"])
 
-    def pdf(self, row_id: int) -> Path | None:
-        """The manual read out of a package, while Hakobiya has it."""
-        row = self.db.one("SELECT pdf_path FROM package_manuals WHERE id=? AND state='ready'", (row_id,))
-        path = Path(row["pdf_path"]) if row and row["pdf_path"] else None
+    def pdf(self, row_id: int, s: PackageSet | None = None) -> Path | None:
+        """The manual read out of a package (one of this set, when a set is given), while Hakobiya has it."""
+        row = self.db.one("SELECT set_name, pdf_path FROM package_manuals WHERE id=? AND state='ready'", (row_id,))
+        path = Path(row["pdf_path"]) if row and row["pdf_path"] and (s is None or row["set_name"] == s.name) else None
         return path if path and path.is_file() else None
 
     def name_of(self, row_id: int) -> str:
         row = self.db.one("SELECT path FROM package_manuals WHERE id=?", (row_id,))
         return row["path"].rsplit("/", 1)[-1] if row else ""
 
-    def matches(self, names: list[str]) -> list[dict]:
+    def matches(self, s: PackageSet, names: list[str]) -> list[dict]:
         """The set's Japanese packages whose title is a game's, each with where its manual stands."""
         out = []
         for f in self.db.all("SELECT idx, path, filename, size FROM files WHERE set_name=? AND regions LIKE '%\"Japan\"%'"
-                             " ORDER BY filename", (SET,)):
+                             " ORDER BY filename", (s.name,)):
             match = name_match(names, f["filename"])
             if not match:
                 continue
             row = self.db.one("SELECT * FROM package_manuals WHERE set_name=? AND idx=? AND path=?",
-                              (SET, f["idx"], f["path"]))
+                              (s.name, f["idx"], f["path"]))
             if row and row["state"] == "ready" and self.pdf(row["id"]) is None:
                 row = None                           # its PDF is gone: as if never fetched
             out.append({**dict(f), "match": match, "row": dict(row) if row else None})
         return sorted(out, key=lambda f: f["match"] != "same")
 
-    async def ask(self, minerva, idx: int, user: str | None) -> None:
+    async def ask(self, minerva, s: PackageSet, idx: int, user: str | None) -> None:
         """Have qBittorrent fetch one package of the set, to be read when it is there."""
-        if self.keys() is None:
+        keys = self.keys()
+        if keys is None:
             raise PackageError(f"{self.key_file.name} isn't in Hakobiya's config folder")
-        f = self.db.one("SELECT * FROM files WHERE set_name=? AND idx=?", (SET, idx))
-        if f is None or not self.loaded():
+        if keys.missing(s.kind):
+            raise PackageError(f"{self.key_file.name} has no {', '.join(keys.missing(s.kind))}")
+        f = self.db.one("SELECT * FROM files WHERE set_name=? AND idx=?", (s.name, idx))
+        if f is None or not self.loaded(s):
             raise PackageError("no such package in the set")
-        t = await minerva.open_set(SET)              # the kept .torrent, or a new one when Minerva changed the set
+        t = await minerva.open_set(s.name)           # the kept .torrent, or a new one when Minerva changed the set
         if not any(x.index == idx and x.path == f["path"] for x in t.files):
             raise PackageError("Minerva changed the set since this page was made. Reload it and pick again.")
-        data = Path(self.db.one("SELECT torrent_path FROM sets WHERE name=?", (SET,))["torrent_path"]).read_bytes()
+        data = Path(self.db.one("SELECT torrent_path FROM sets WHERE name=?", (s.name,))["torrent_path"]).read_bytes()
         async with self.make_qbit() as q:
-            await send(q, t, data, f"Minerva_Myrient - {SET}.torrent", [idx], tags=f"{SENT_TAG},{TAG}")
+            await send(q, t, data, f"Minerva_Myrient - {s.name}.torrent", [idx], tags=f"{SENT_TAG},{TAG}")
         now = utcnow().isoformat()
         self.db.execute("INSERT INTO package_manuals(set_name, idx, path, size, infohash, state, asked_by, created_at,"
                         " updated_at) VALUES (?,?,?,?,?, 'downloading', ?,?,?) ON CONFLICT(set_name, idx) DO UPDATE SET"
                         " path=excluded.path, size=excluded.size, infohash=excluded.infohash, state='downloading',"
                         " note=NULL, pages=NULL, pdf_path=NULL, asked_by=excluded.asked_by, updated_at=excluded.updated_at",
-                        (SET, idx, f["path"], f["size"], t.infohash, user, now, now))
+                        (s.name, idx, f["path"], f["size"], t.infohash, user, now, now))
         self.wake.set()
 
     def _set(self, row_id: int, state: str, note: str | None, pages: int | None = None, pdf: Path | None = None) -> None:
@@ -342,10 +447,14 @@ class Packages:
         """Read an arrived package; False when it couldn't be read (it then stays in qBittorrent, for another go)."""
         out, name = self.out_dir / f"psn-{row['id']}.pdf", row["path"].rsplit("/", 1)[-1]
         try:
-            keys = self.keys()
+            keys, s = self.keys(), set_by(name=row["set_name"])
             if keys is None:
                 raise PackageError(f"{self.key_file.name} isn't in Hakobiya's config folder any more")
-            pages = await asyncio.to_thread(manual_pdf, self.data_root / "torrents" / row["path"], keys, out)
+            if s is None:
+                raise PackageError("Hakobiya doesn't read this set's packages")
+            if keys.missing(s.kind):
+                raise PackageError(f"{self.key_file.name} has no {', '.join(keys.missing(s.kind))} any more")
+            pages = await asyncio.to_thread(manual_pdf, self.data_root / "torrents" / row["path"], keys, out, s.kind)
         except (PackageError, OSError) as e:
             self._set(row["id"], "failed", f"{str(e)[:300]}. The package is still in qBittorrent.")
             log.warning("package %s couldn't be read: %s", name, e)
