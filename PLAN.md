@@ -136,7 +136,19 @@ The originals in `/data/torrents/Minerva_Myrient/...` are **never modified or mo
   back"; if an upload fails, the old manual is put back at once (RomM removes the file when an upload fails).
 - Access: archive.org only (the search, an item's file list, its PDFs; redirects are followed only to
   archive.org's own hosts), one request at a time with a pause, a User-Agent that names Hakobiya, answers cached.
-- Not done: items with only page images (no PDF); the manuals inside PSN packages and 3DS ROMs.
+- **PS one Classics packages (0.9.0, `packages.py`):** a second source for PlayStation games, also only on
+  request: one package of Minerva's set through qBittorrent, its `DOCUMENT.DAT` read into a PDF, the package
+  removed again. Decisions:
+  - The fixed keys the packages are encrypted with stay out of the repository; they come from
+    `/config/psn-keys.txt`, and the feature is off without it.
+  - Minerva: nothing new. The set's `.torrent` is opened like on the set's own page (once, then kept).
+  - Removal is the one thing here that deletes on its own, so it is narrow: only a torrent Hakobiya added for
+    manuals (its tag), never one that is used for anything else (another package on its way, a job from the set's
+    page, any other file on or downloaded), and never after a failed read. Nothing is ever switched off in a
+    torrent that stays.
+  - The PDF is written here (each page's pixels as they are, a point a pixel), so nothing is recompressed.
+- Not done: items with only page images (no PDF); the manuals inside PSP packages (another key scheme) and 3DS
+  ROMs.
 
 ## Decisions
 

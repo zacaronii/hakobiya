@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -30,7 +31,8 @@ from .qbit import QBit, QBitError, QBitView
 from .art import ODD_SHAPE, REPOS, Libretro, cover_source, image_size, lookup_names
 from . import make as maker
 from .genuine import Keeper, ScreenScraper, status_of
-from .manuals import Archive, ArchiveError, game_names, item_link, manual_state, search_terms, sha256_of
+from .manuals import Archive, ArchiveError, game_names, item_link, manual_state, search_terms, sha256_of, source_label
+from . import packages as psn
 from .processor import Processor
 from .regions import MEDIA, RegionKeeper, inside
 from .romm import Romm, RommError
@@ -106,10 +108,12 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
     keeper = Keeper(db, romm, ScreenScraper(s.screenscraper) if s.screenscraper else None, s.romm_resources) \
         if romm else None
     regions = RegionKeeper(db, romm, s.romm_resources, s.config_dir / "media-backup") if romm else None
+    packages = psn.Packages(db, s.config_dir / "psn-keys.txt", s.config_dir / "package-manuals", s.data_root,
+                            lambda: QBit(s.qbit_url, s.qbit_username, s.qbit_password))
 
     @asynccontextmanager
     async def lifespan(app):
-        tasks = [asyncio.create_task(worker.run())] if s.worker else []
+        tasks = [asyncio.create_task(worker.run()), asyncio.create_task(packages.run())] if s.worker else []
         if s.worker and keeper:
             tasks.append(asyncio.create_task(keeper.run()))
             if s.region_check:
@@ -123,6 +127,7 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
     templates.env.filters["human"] = human
+    templates.env.filters["manual_source"] = source_label
     templates.env.globals["version"] = __version__
 
     @app.middleware("http")
@@ -749,7 +754,8 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
         return RedirectResponse(f"/make/p/{c['platform_id']}?show=all&msg={quote('Previous disc/cart art put back.')}",
                                 status_code=303)
 
-    # ------------------------------------------------------------- manuals (Japanese ones from the Internet Archive)
+    # ------------------------------------------------------------- manuals (Japanese ones from the Internet Archive
+    # and from inside PS one Classics packages)
     archive = Archive(db, s.config_dir / "manual-cache", pause=s.archive_pause)
     manual_backups = s.config_dir / "manual-backup"
 
@@ -837,7 +843,29 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
         changes = [dict(c) for c in db.all("SELECT * FROM manual_changes WHERE rom_id=? ORDER BY id DESC", (rom_id,))]
         return render(request, "manuals_game.html", rom=r, game=r.get("name") or r["fs_name"], state=label,
                       japanese=japanese, has_file=manual_file(r) is not None, q="; ".join(terms) if not link else q,
-                      wide=wide, packs=packs, found=found, link=link, changes=changes, msg=msg, err=err)
+                      wide=wide, packs=packs, found=found, link=link, changes=changes, msg=msg, err=err,
+                      psn=await package_rows(r))
+
+    async def package_rows(r: dict) -> dict | None:
+        """What the game's page says about PS one Classics packages; None on other platforms' pages."""
+        if r.get("platform_fs_slug") not in psn.SLUGS:
+            return None
+        try:
+            if packages.keys() is None:
+                return {"keys": False, "key_file": packages.key_file.name}
+        except psn.PackageError as e:
+            return {"keys": False, "key_file": packages.key_file.name, "problem": str(e)}
+        if not packages.loaded():
+            return {"keys": True, "loaded": False}
+        files = packages.matches(game_names(r))
+        for f in files:
+            if f["row"] and f["row"]["state"] == "downloading":
+                try:
+                    got = next((x for x in await qview.files(f["row"]["infohash"]) if x["name"] == f["path"]), None)
+                    f["percent"] = math.floor(got["progress"] * 100) if got else None
+                except (QBitError, OSError):
+                    f["percent"] = None
+        return {"keys": True, "loaded": True, "files": files, "source": psn.SOURCE}
 
     @app.get("/manuals/current/{rom_id}")
     async def manuals_current(rom_id: int):
@@ -855,6 +883,54 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
             return document(await archive.fetch(identifier, name))
         except ArchiveError as e:
             raise HTTPException(502, str(e))
+
+    # manuals inside PS one Classics packages: a package is fetched only when its button is pressed
+    def psn_back(form, msg: str = "", err: str = "") -> RedirectResponse:
+        rom = str(form.get("rom", ""))
+        note = f"?msg={quote(msg)}" if msg else f"?err={quote(err[:500])}" if err else ""
+        return RedirectResponse(f"/manuals/g/{int(rom) if rom.isdigit() else 0}{note}", status_code=303)
+
+    @app.post("/manuals/psn/open")
+    async def manuals_psn_open(request: Request):
+        """Load the set's file list (its .torrent from Minerva's CDN, once), as opening the set's own page does."""
+        form = await request.form()
+        try:
+            if db.one("SELECT 1 FROM sets WHERE name=?", (psn.SET,)) is None:
+                await minerva.refresh_index()
+            await minerva.open_set(psn.SET)
+        except KeyError:
+            return psn_back(form, err="Minerva's index doesn't list the PS one Classics set.")
+        except (httpx.HTTPError, RuntimeError, ValueError, OSError) as e:
+            return psn_back(form, err=f"The set's list couldn't be loaded from Minerva: {e}")
+        return psn_back(form)
+
+    @app.post("/manuals/psn/fetch")
+    async def manuals_psn_fetch(request: Request):
+        form = await request.form()
+        idx = str(form.get("idx", ""))
+        try:
+            await packages.ask(minerva, int(idx) if idx.isdigit() else -1, request.headers.get("x-authentik-username"))
+        except (psn.PackageError, QBitError, httpx.HTTPError, KeyError, ValueError, OSError) as e:
+            return psn_back(form, err=f"The package wasn't sent to qBittorrent: {e}")
+        qview.forget()
+        return psn_back(form, msg="qBittorrent is fetching the package. Hakobiya reads its manual when it's there; "
+                                  "reload this page to see it.")
+
+    @app.post("/manuals/psn/stop")
+    async def manuals_psn_stop(request: Request):
+        form = await request.form()
+        row = str(form.get("row", ""))
+        try:
+            await packages.stop(int(row) if row.isdigit() else 0)
+        except (QBitError, OSError) as e:
+            return psn_back(form, err=f"Stopped here, but qBittorrent didn't answer, so the package may still be in it: {e}")
+        qview.forget()
+        return psn_back(form, msg="Stopped.")
+
+    @app.get("/manuals/psn/{row_id}")
+    async def manuals_psn_file(row_id: int):
+        """A manual read out of a package, for a look: the same file that would go into RomM."""
+        return document(packages.pdf(row_id))
 
     async def put_manual(r: dict, pdf: Path, backup: Path | None) -> None:
         """Upload `pdf` as the game's manual. RomM writes over the manual it had and deletes the file when an
@@ -881,7 +957,13 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
             r = await need_romm().rom(rom_id)
             if not name:
                 raise ArchiveError("No PDF was ticked.")
-            pdf = await archive.fetch(identifier, name)
+            if identifier == psn.SOURCE:
+                pdf = packages.pdf(int(name)) if name.isdigit() else None
+                if pdf is None:
+                    raise ArchiveError("That package's manual isn't here any more. Fetch the package again.")
+                name = packages.name_of(int(name))
+            else:
+                pdf = await archive.fetch(identifier, name)
             was, _ = manual_now(r, manual_changes())
             old, backup = manual_file(r), None
             if r.get("path_manual") and old is None:
@@ -898,7 +980,8 @@ def create_app(settings: Settings | None = None, minerva: Minerva | None = None,
                        (rom_id, r.get("platform_id") or 0, r.get("name") or r["fs_name"], identifier, name, digest, size,
                         was, str(backup) if backup else None, utcnow().isoformat(),
                         request.headers.get("x-authentik-username")))
-            archive.forget(identifier, name)
+            if identifier != psn.SOURCE:
+                archive.forget(identifier, name)
         except (RommError, ArchiveError, OSError) as e:
             return RedirectResponse(f"{back}?err={quote(str(e)[:500])}", status_code=303)
         note = "The manual is in RomM." + (" The one it had is kept: Put back restores it." if backup else "")

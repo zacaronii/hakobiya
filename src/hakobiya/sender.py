@@ -23,7 +23,9 @@ class SendResult:
     started: bool
 
 
-async def send(q: QBit, t: Torrent, torrent_bytes: bytes, filename: str, picks: list[int]) -> SendResult:
+async def send(q: QBit, t: Torrent, torrent_bytes: bytes, filename: str, picks: list[int],
+               tags: str = TAG) -> SendResult:
+    """`tags` go on a torrent this adds; one already in qBittorrent keeps its own."""
     wanted = {f.path for f in t.files if f.index in set(picks)}
     if len(wanted) != len(set(picks)):
         raise QBitError("some picked files aren't in this torrent")
@@ -42,7 +44,7 @@ async def send(q: QBit, t: Torrent, torrent_bytes: bytes, filename: str, picks: 
             await q.start(t.infohash)
         return SendResult("existing", len(need), len(wanted) - len(need), started)
 
-    await q.add_stopped(torrent_bytes, filename, TAG)
+    await q.add_stopped(torrent_bytes, filename, tags)
     files = await q.wait_for(t.infohash, len(t.files))
     by_path = {f["name"]: f for f in files}
     missing = wanted - by_path.keys()
