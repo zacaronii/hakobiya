@@ -5,7 +5,12 @@
     <td class="name"><label style="white-space:normal"><input type="radio" name="pick" value="{{ identifier }}/{{ f.name }}" required>
       {{ f.name }}</label>{% if note %} <span class="chip">{{ note }}</span>{% endif %}</td>
     <td class="num mono muted">{{ f.size|human if f.size else "" }}</td>
-    <td class="muted">{{ "as uploaded" if f.original else "made by the Archive" }}</td>
+    {% if f.scans %}
+    <td class="muted"><span class="chip ok">original scans{% if f.pages %} ({{ f.pages }} pages){% endif %}</span>
+      {% if not f.pages %}{% if f.files %}{{ f.files }} files in the archive; {% endif %}made into a PDF when looked at{% endif %}</td>
+    {% else %}
+    <td class="muted">{{ "PDF as uploaded" if f.original else "the Archive's compressed copy" }}</td>
+    {% endif %}
     <td><a href="/manuals/file/{{ identifier }}/{{ f.name|urlencode }}" target="_blank">Look at it</a></td>
   </tr>
 {% endmacro %}
@@ -24,13 +29,14 @@
   <button>Search</button>
   <button class="ghost" name="fresh" value="true">Ask the Archive again</button>
 </form>
-<p class="sub">Titles are separated with ";". An item's address (archive.org/details/…) lists that item's PDFs.
-  Answers are kept for a week.</p>
+<p class="sub">Titles are separated with ";". An item's address (archive.org/details/…) lists that item's PDFs and
+  page images. Answers are kept for a week. The uploader's original scans come first: the PDF the Archive makes of
+  them is heavily compressed, so it is listed after them.</p>
 
 <form method="post" action="/manuals/apply" id="applyform">
 <input type="hidden" name="rom" value="{{ rom.id }}">
 <div class="basket">
-  <span>Look at a PDF, then tick it. {% if has_file %}The manual RomM has now is kept for Put back.{% endif %}</span>
+  <span>Look at a manual, then tick it. {% if has_file %}The manual RomM has now is kept for Put back.{% endif %}</span>
   <button id="applybtn" disabled>Put the ticked manual into RomM</button>
 </div>
 
@@ -94,9 +100,10 @@
     {% if it.japanese %}<span class="chip ok">Japanese</span>{% endif %}
     <span class="mono muted">{{ it.identifier }}</span></th></tr>
   {% if it.pdfs is defined %}
-    {% for f in it.pdfs[:40] %}{{ pdf_row(it.identifier, f) }}{% endfor %}
-    {% if it.pdfs|length > 40 %}<tr><td colspan="4" class="muted">…and {{ it.pdfs|length - 40 }} more PDFs: open the item on archive.org to find the one.</td></tr>{% endif %}
-    {% if not it.pdfs %}<tr><td colspan="4" class="muted">No PDF in this item{% if it.images %}: {{ it.images }} page images, which Hakobiya can't turn into a manual yet{% endif %}.</td></tr>{% endif %}
+    {% set files = (it.scans or []) + it.pdfs %}
+    {% for f in files[:40] %}{{ pdf_row(it.identifier, f) }}{% endfor %}
+    {% if files|length > 40 %}<tr><td colspan="4" class="muted">…and {{ files|length - 40 }} more: open the item on archive.org to find the one.</td></tr>{% endif %}
+    {% if not files %}<tr><td colspan="4" class="muted">No PDF and no archive of page images (.cbz, .zip) in this item{% if it.images %}: {{ it.images }} page images one by one, which Hakobiya can't turn into a manual yet{% endif %}.</td></tr>{% endif %}
   {% else %}
   <tr><td colspan="4"><a href="?q={{ q|urlencode }}{% if wide %}&amp;wide=true{% endif %}&amp;item={{ it.identifier }}">Show its files</a></td></tr>
   {% endif %}

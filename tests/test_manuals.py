@@ -1,12 +1,15 @@
 import hashlib
+import io
 import json
+import zipfile
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from hakobiya import manuals
 from hakobiya import minerva as mv
@@ -28,7 +31,25 @@ ROMS = [
      "alternative_names": [], "platform_id": 9, "platform_fs_slug": "psx",
      "path_manual": "roms/9/3/manual/3.pdf", "url_manual": SS.format("jp")},
 ]
+
+
+def made_up_scans(pages=3) -> bytes:
+    """A Comic Book ZIP of made-up pages (one JPEG and PNGs of plain colour), plus the junk such archives carry."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zf:
+        for i in range(1, pages + 1):
+            page = io.BytesIO()
+            Image.new("RGB", (20 + i, 30), (40 * i, 90, 160)).save(page, "JPEG" if i == 1 else "PNG")
+            zf.writestr(f"scan/{i}.{'jpg' if i == 1 else 'png'}", page.getvalue())
+        zf.writestr("__MACOSX/scan/._1.jpg", b"junk")
+    return out.getvalue()
+
+
+CBZ = made_up_scans()
 PACK = {"metadata": {"title": "Made-up manuals", "language": "jpn"}, "files": [
+    {"name": "つきのにわ (Moon Garden).cbz", "source": "original", "size": str(len(CBZ)), "filecount": "4",
+     "format": "Comic Book ZIP"},
+    {"name": "つきのにわ (Moon Garden)_jp2.zip", "source": "derivative", "size": "900"},
     {"name": "つきのにわ (Moon Garden).pdf", "source": "derivative", "size": str(len(PDF))},
     {"name": "Moon Garden 2 (o).pdf", "source": "original", "size": "900"},
     {"name": "Other Game (o).pdf", "source": "original", "size": "900"},
@@ -72,6 +93,9 @@ def test_collection_files_are_matched_by_title():
     assert manuals.name_match(names, "Moon Garden 2 (o).pdf") == "close"
     assert manuals.name_match(names, "Other Game (o).pdf") is None
     assert manuals.name_match(["Run"], "Runner Up (o).pdf") is None                 # too short to mean anything
+    assert manuals.name_match(names, "つきのにわ (Moon Garden).cbz") == "same"        # page images, same names
+    assert manuals.name_match(names, "Moon Garden_jp2.zip") == "same"
+    assert manuals.name_match(names, "dir/Moon Garden.zip") == "same"
 
 
 def test_only_archive_org_hosts_are_followed():
@@ -142,6 +166,70 @@ async def test_a_download_is_a_listed_pdf_from_archive_org(archive):
     assert [p.name for p in (tmp / "cache").iterdir()] == [path.name]             # nothing half-fetched is left
     a.forget("moon-garden-manual", "Moon Garden.PDF")
     assert not path.exists()
+
+
+SCAN_ITEM = {"metadata": {"title": "Made-up scans"}, "files": [
+    {"name": "Moon Garden.cbz", "source": "original", "size": str(len(CBZ)), "filecount": "4"},
+    {"name": "Moon Garden.pdf", "source": "derivative", "size": "50", "format": "Text PDF"},
+    {"name": "Moon Garden_jp2.zip", "source": "derivative", "size": "50"},
+    {"name": "Moon Garden.epub", "source": "derivative", "size": "50"},
+    {"name": "Broken.cbz", "source": "original", "size": "30"},
+    {"name": "Fake.zip", "source": "original", "size": "30"},
+    {"name": "Away.cbz", "source": "original", "size": "30"},
+    {"name": "Huge.cbz", "source": "original", "size": str(manuals.MAX_SCANS + 1)}]}
+
+
+async def test_original_page_images_are_listed_and_made_into_a_pdf(archive):
+    from pypdf import PdfReader
+    a, router, tmp = archive
+    meta = router.get("https://archive.org/metadata/moon-scans").mock(return_value=answer(SCAN_ITEM))
+    listing = await a.item("moon-scans")
+    assert [(f["name"], f["files"]) for f in listing["scans"]] == [
+        ("Away.cbz", None), ("Broken.cbz", None), ("Fake.zip", None), ("Huge.cbz", None), ("Moon Garden.cbz", 4)]
+    assert [f["name"] for f in listing["pdfs"]] == ["Moon Garden.pdf"]          # the _jp2.zip isn't an original
+    url = "https://archive.org/download/moon-scans/Moon%20Garden.cbz"
+    router.get(url).mock(return_value=httpx.Response(
+        302, headers={"location": "https://ia601.us.archive.org/3/items/moon-scans/Moon%20Garden.cbz"}))
+    real = router.get("https://ia601.us.archive.org/3/items/moon-scans/Moon%20Garden.cbz").mock(
+        return_value=httpx.Response(200, content=CBZ))
+    assert a.pages("moon-scans", "Moon Garden.cbz") is None
+    path = await a.fetch("moon-scans", "Moon Garden.cbz")
+    assert path.suffix == ".pdf" and path.read_bytes().startswith(b"%PDF-")
+    assert len(PdfReader(path).pages) == 3 and a.pages("moon-scans", "Moon Garden.cbz") == 3
+    assert [p.name for p in (tmp / "cache").iterdir()] == [path.name]             # the archive itself isn't kept
+    assert await a.fetch("moon-scans", "Moon Garden.cbz") == path and real.call_count == 1
+
+    broken = io.BytesIO()
+    with zipfile.ZipFile(broken, "w") as zf:
+        zf.writestr("1.jpg", b"not a picture")
+    router.get("https://archive.org/download/moon-scans/Broken.cbz").mock(
+        return_value=httpx.Response(200, content=broken.getvalue()))
+    router.get("https://archive.org/download/moon-scans/Fake.zip").mock(
+        return_value=httpx.Response(200, content=b"<html>not an archive</html>"))
+    router.get("https://archive.org/download/moon-scans/Away.cbz").mock(
+        return_value=httpx.Response(302, headers={"location": "https://elsewhere.example/Away.cbz"}))
+    huge = router.get("https://archive.org/download/moon-scans/Huge.cbz")
+    for name, why in (("Broken.cbz", "couldn't be made into a PDF: 1.jpg can't be read"),
+                      ("Fake.zip", "isn't a zip archive"), ("Away.cbz", "away from archive.org"),
+                      ("Huge.cbz", "larger than 200 MB"), ("Moon Garden_jp2.zip", "no such PDF or page images")):
+        with pytest.raises(manuals.ArchiveError, match=why):
+            await a.fetch("moon-scans", name)
+    assert huge.call_count == 0 and meta.call_count == 1
+    assert [p.name for p in (tmp / "cache").iterdir()] == [path.name]             # nothing half-made is left
+    a.forget("moon-scans", "Moon Garden.cbz")
+    assert a.pages("moon-scans", "Moon Garden.cbz") is None
+
+
+async def test_a_file_list_kept_before_page_images_were_listed_is_read_again(archive):
+    a, router, _ = archive
+    meta = router.get("https://archive.org/metadata/moon-scans").mock(return_value=answer(SCAN_ITEM))
+    a._keep("item:moon-scans", {"identifier": "moon-scans", "title": "Made-up scans", "japanese": False,
+                                "pdfs": [], "images": 0})
+    assert len((await a.item("moon-scans"))["scans"]) == 5 and meta.call_count == 1
+    a._keep("item:moon-scans", {"identifier": "moon-scans", "title": "Made-up scans", "japanese": False,
+                                "pdfs": [], "images": 0})
+    meta.mock(return_value=httpx.Response(503))
+    assert (await a.item("moon-scans"))["scans"] == []                             # the Archive down: as it was
 
 
 def test_the_cache_drops_what_is_old_and_then_the_oldest_over_its_size(tmp_path, monkeypatch):
@@ -218,6 +306,9 @@ def app(tmp_path):
             return_value=httpx.Response(200, content=PDF))
         router.get("https://archive.org/download/moon-garden-manual/Moon%20Garden.pdf").mock(
             return_value=httpx.Response(200, content=b"%PDF-refused"))
+        for pack in manuals.PACKS["psx"]:
+            router.get(f"https://archive.org/download/{pack}/{quote('つきのにわ (Moon Garden).cbz')}").mock(
+                return_value=httpx.Response(200, content=CBZ))
         app = create_app(s, mv.Minerva(db, tmp_path / "t"), None, db)
         yield TestClient(app, headers=HEAD), db, calls, res, router
 
@@ -239,7 +330,7 @@ def test_pages_show_what_each_game_has_and_change_nothing(app):
     opened = c.get("/manuals/g/1", params={"item": "moon-garden-scans"}).text
     assert "3 page images" in opened
     linked = c.get("/manuals/g/1", params={"q": "https://archive.org/details/moon-garden-manual"}).text
-    assert "Moon Garden.PDF" in linked and "as uploaded" in linked and "made by the Archive" in linked
+    assert "Moon Garden.PDF" in linked and "as uploaded" in linked and "compressed copy" in linked
     assert c.get("/manuals/current/1").content == OLD and c.get("/manuals/current/2").status_code == 404
     look = c.get("/manuals/file/moon-garden-manual/Moon Garden.PDF")
     assert look.content == PDF and look.headers["content-type"] == "application/pdf"
@@ -300,7 +391,7 @@ def test_put_back_leaves_a_manual_that_changed_since(app):
 
 def test_nothing_is_replaced_without_a_tick_a_listed_pdf_and_a_backup(app):
     c, db, calls, res, _ = app
-    for pick, why in (("", "No PDF was ticked"), ("moon-garden-manual/notes.txt", "no such PDF"),
+    for pick, why in (("", "No manual was ticked"), ("moon-garden-manual/notes.txt", "no such PDF"),
                       ("../x/y.pdf", "isn't an Internet Archive item name")):
         r = c.post("/manuals/apply", data={"rom": "1", "pick": pick}, follow_redirects=False)
         assert why in unquote(r.headers["location"])
@@ -318,3 +409,28 @@ def test_a_failed_upload_puts_the_old_manual_back(app):
     assert [(k[0], k[3]) for k in calls] == [("upload", b"%PDF-refused"), ("upload", OLD)]
     assert (res / "roms/9/1/manual/1.pdf").read_bytes() == OLD
     assert db.one("SELECT COUNT(*) AS n FROM manual_changes")["n"] == 0
+
+
+def test_original_scans_come_first_and_go_into_romm_as_a_pdf(app):
+    from pypdf import PdfReader
+    c, db, calls, res, _ = app
+    pack = manuals.PACKS["psx"][0]
+    page = c.get("/manuals/g/1").text
+    assert "original scans" in page and "4 files in the archive" in page
+    assert page.index("つきのにわ (Moon Garden).cbz") < page.index("つきのにわ (Moon Garden).pdf")
+    assert "compressed copy" in page and "_jp2.zip" not in page
+    look = c.get(f"/manuals/file/{pack}/つきのにわ (Moon Garden).cbz")
+    assert look.headers["content-type"] == "application/pdf" and look.content.startswith(b"%PDF-")
+    assert "original scans (3 pages)" in c.get("/manuals/g/1").text               # counted once it was made
+    assert not calls and db.one("SELECT COUNT(*) AS n FROM manual_changes")["n"] == 0
+
+    r = c.post("/manuals/apply", data={"rom": "1", "pick": f"{pack}/つきのにわ (Moon Garden).cbz"}, follow_redirects=False)
+    assert "is in RomM" in unquote(r.headers["location"])
+    [(what, rom_id, field, data)] = calls
+    assert (what, rom_id, field) == ("upload", 1, "manual.pdf") and data == look.content
+    assert len(PdfReader(io.BytesIO(data)).pages) == 3
+    change = db.one("SELECT * FROM manual_changes")
+    assert (change["identifier"], change["file"]) == (pack, "つきのにわ (Moon Garden).cbz")
+    assert Path(change["backup_path"]).read_bytes() == OLD
+    c.post(f"/manuals/undo/{change['id']}")
+    assert calls[-1] == ("upload", 1, "manual.pdf", OLD)
