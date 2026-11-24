@@ -12,7 +12,7 @@ RomM in the right format.
   Files a set already has switched on in qBittorrent (a set you added there yourself) can be ticked and sent
   too: nothing is downloaded again, they are just filed.
 - **Milestone 3 (now):** finished files are filed into RomM automatically, one at a time: cartridge zips hardlinked,
-  CD/DVD/UMD images converted to CHD (multi-disc games in a folder with an .m3u), 3DS extracted; then RomM scans
+  CD/DVD/UMD images converted to CHD (multi-disc games in a folder with an .m3u), 3DS and GameCube (RVZ) extracted; then RomM scans
   that platform. Originals keep seeding and nothing in the library is overwritten.
 - **Milestone 4 (now):** the Art tab. Per RomM platform: every cover with where it came from (ScreenScraper region,
   IGDB, uploaded), its size, and flags (no cover, not Japanese, odd shape for the platform). Optionally compares each

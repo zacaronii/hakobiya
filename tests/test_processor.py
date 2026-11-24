@@ -77,6 +77,20 @@ def test_3ds_is_extracted(env):
     assert out.state == "done" and (lib / "3ds" / "Gyakuten Saiban 5 (Japan).3ds").read_bytes() == b"NCSD" * 10
 
 
+def test_gamecube_rvz_is_extracted(env):
+    data, lib, p = env
+    base = "Minerva_Myrient/Redump/Nintendo - GameCube - NKit RVZ [zstd-19-128k]"
+    rel = put(data, f"{base}/Paper Mario RPG (Japan).zip", {"Paper Mario RPG (Japan).rvz": b"RVZ\x01"})
+    out = p.run(6, rel, "ngc")
+    assert out.state == "done" and (lib / "ngc" / "Paper Mario RPG (Japan).rvz").read_bytes() == b"RVZ\x01"
+    for disc in (1, 2):
+        name = f"Tales of Symphonia (Japan) (Disc {disc})"
+        assert p.run(6 + disc, put(data, f"{base}/{name}.zip", {f"{name}.rvz": b"RVZ"}), "ngc").state == "done"
+    game = lib / "ngc" / "Tales of Symphonia (Japan)"
+    assert (game / "Tales of Symphonia (Japan).m3u").read_text().splitlines() == [
+        "Tales of Symphonia (Japan) (Disc 1).rvz", "Tales of Symphonia (Japan) (Disc 2).rvz"]
+
+
 def test_problems_are_reported_not_hidden(env):
     data, lib, p = env
     assert p.run(5, "x.zip", None).state == "needs_rule"

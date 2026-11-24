@@ -31,6 +31,7 @@ PLATFORMS = {
     "Sony - PlayStation": "psx",
     "Sony - PlayStation 2": "ps2",
     "Sony - PlayStation Portable": "psp",
+    "Nintendo - GameCube - NKit RVZ [zstd-19-128k]": "ngc",
 }
 VARIANT_RE = re.compile(r"\s*\((Aftermarket|Private)\)$")
 

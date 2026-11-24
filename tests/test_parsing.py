@@ -59,4 +59,5 @@ def test_index_page():
     assert by["Redump - NEC - PC Engine CD & TurboGrafx CD"]["href"].count("&amp;") == 0     # &amp; unescaped
     assert platform_slug("Redump", "NEC - PC Engine CD & TurboGrafx CD") == "turbografx-cd"
     assert platform_slug("No-Intro", "Nintendo - Family Computer Disk System (FDS) (Aftermarket)") == "fds"
+    assert platform_slug("Redump", "Nintendo - GameCube - NKit RVZ [zstd-19-128k]") == "ngc"
     assert platform_slug("TOSEC", "Nintendo - Famicom") is None
