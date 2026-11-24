@@ -70,6 +70,7 @@ The originals in `/data/torrents/Minerva_Myrient/...` are **never modified or mo
 | CD | PS1, Saturn, PCE-CD, Mega-CD, Dreamcast (GDI) | Unzip to a temp dir under `/data/torrents/.toolbox-tmp` (same array, deleted after), then `chdman createcd`. Multi-disc goes in one folder `<Game>/` with `<Game>.m3u`. |
 | DVD/UMD | PSP, PS2 | Temp unzip, then `chdman createdvd` (PSP with `-hs 2048`). Multi-disc folder + `.m3u`. |
 | 3DS | Nintendo 3DS (Decrypted) | Extract the `.3ds` (needs the space of a full copy). Never Z3DS/`.zcci`. |
+| GameCube | Nintendo - GameCube - NKit RVZ | Extract the `.rvz` into `ngc/` (Dolphin reads RVZ, not a zip of it). Multi-disc folder + `.m3u`. |
 | Anything unknown | — | Put the job in **needs rule** and do nothing. The user picks a rule once per set. |
 
 - **Set → RomM slug mapping:** a small editable table, seeded from the slugs already present (`nes`, `snes`, `gb`, `gba`, `gbc`, `genesis`, `n64`, `nds`, `psx`, `psp`, `ps2`, `saturn`, `dc`, `3ds`, `tg16`, `turbografx-cd`…), plus new ones like `fds`. A missing slug means a new folder; RomM creates the platform on scan.

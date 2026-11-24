@@ -5,6 +5,7 @@ The seeding originals in /data/torrents are only ever read. Per platform folder:
 - CD sets: unzip to a temp folder on the array, `chdman createcd` (cue or gdi) -> .chd;
 - DVD/UMD sets: `chdman createdvd` (PSP with -hs 2048) -> .chd;
 - 3DS: the .3ds is extracted (Azahar can't read it zipped);
+- GameCube (the NKit RVZ set): the .rvz is extracted (Dolphin reads RVZ, not a zip of it);
 - anything else: left alone until a rule exists.
 Discs of one game go into a folder named after the game with an .m3u listing them, as in the existing library.
 Nothing in the library is ever overwritten."""
@@ -26,7 +27,10 @@ KINDS = {
     **{s: "chd_cd" for s in ("psx", "saturn", "segacd", "turbografx-cd", "dc")},
     **{s: "chd_dvd" for s in ("psp", "ps2")},
     "3ds": "extract",
+    "ngc": "extract",
 }
+# What "extract" takes out of the zip, and the extension it is filed under.
+EXTRACT = {"3ds": ((".3ds", ".cci"), ".3ds"), "ngc": ((".rvz",), ".rvz")}
 DISC_RE = re.compile(r"\(Disc (\d+)\)")
 
 
@@ -71,7 +75,10 @@ class Processor:
             if self.free_tb() < self.min_free_tb:
                 return Outcome("waiting_space", f"less than {self.min_free_tb} TB free; will retry")
             if kind == "extract":
-                return self._extract_3ds(job_id, src, folder)
+                out = self._extract(job_id, src, folder, slug)
+                if n.disc is not None and out.state == "done":
+                    self._write_m3u(folder, n.game, EXTRACT[slug][1])
+                return out
             target = folder / f"{stem}.chd"
             if target.exists():
                 return Outcome("exists", "already in the library; left as it is", str(target))
@@ -125,11 +132,12 @@ class Processor:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def _extract_3ds(self, job_id: int, src: Path, folder: Path) -> Outcome:
+    def _extract(self, job_id: int, src: Path, folder: Path, slug: str) -> Outcome:
+        exts, ext = EXTRACT[slug]
         tmp = self._unpack(job_id, src)
         try:
-            image = self._find(tmp, ".3ds", ".cci")
-            target = folder / f"{names.strip_ext(src.name)}.3ds"
+            image = self._find(tmp, *exts)
+            target = folder / f"{names.strip_ext(src.name)}{ext}"
             if target.exists():
                 return Outcome("exists", "already in the library; left as it is", str(target))
             shutil.move(str(image), str(target))
@@ -138,8 +146,8 @@ class Processor:
             shutil.rmtree(tmp, ignore_errors=True)
 
     @staticmethod
-    def _write_m3u(folder: Path, game: str) -> None:
-        discs = sorted(folder.glob("*.chd"), key=lambda p: int(m.group(1)) if (m := DISC_RE.search(p.name)) else 0)
+    def _write_m3u(folder: Path, game: str, ext: str = ".chd") -> None:
+        discs = sorted(folder.glob(f"*{ext}"), key=lambda p: int(m.group(1)) if (m := DISC_RE.search(p.name)) else 0)
         tmp = folder / f".{game}.m3u.tmp"
         tmp.write_text("".join(p.name + "\n" for p in discs))
         tmp.replace(folder / f"{game}.m3u")
