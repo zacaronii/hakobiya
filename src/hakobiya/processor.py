@@ -5,7 +5,7 @@ The seeding originals in /data/torrents are only ever read. Per platform folder:
 - CD sets: unzip to a temp folder on the array, `chdman createcd` (cue or gdi) -> .chd;
 - DVD/UMD sets: `chdman createdvd` (PSP with -hs 2048) -> .chd;
 - 3DS: the .3ds is extracted (Azahar can't read it zipped);
-- GameCube (the NKit RVZ set): the .rvz is extracted (Dolphin reads RVZ, not a zip of it);
+- GameCube and Wii (the NKit RVZ sets): the .rvz is extracted (Dolphin reads RVZ, not a zip of it);
 - anything else: left alone until a rule exists.
 Discs of one game go into a folder named after the game with an .m3u listing them, as in the existing library.
 Nothing in the library is ever overwritten."""
@@ -28,9 +28,10 @@ KINDS = {
     **{s: "chd_dvd" for s in ("psp", "ps2")},
     "3ds": "extract",
     "ngc": "extract",
+    "wii": "extract",
 }
 # What "extract" takes out of the zip, and the extension it is filed under.
-EXTRACT = {"3ds": ((".3ds", ".cci"), ".3ds"), "ngc": ((".rvz",), ".rvz")}
+EXTRACT = {"3ds": ((".3ds", ".cci"), ".3ds"), "ngc": ((".rvz",), ".rvz"), "wii": ((".rvz",), ".rvz")}
 DISC_RE = re.compile(r"\(Disc (\d+)\)")
 
 
