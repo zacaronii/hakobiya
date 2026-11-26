@@ -139,3 +139,11 @@ async def test_worker_files_finished_downloads_and_asks_romm_to_scan(env, tmp_pa
         assert (lib / "fds" / "Zelda (Japan).zip").exists()
         assert scan.calls[0].request.headers["authorization"] == "Bearer tok"
         assert b'"platform_fs_slugs":["fds"]' in scan.calls[0].request.content.replace(b" ", b"")
+
+
+def test_wii_rvz_is_extracted(env):
+    data, lib, p = env
+    base = "Minerva_Myrient/Redump/Nintendo - Wii - NKit RVZ [zstd-19-128k]"
+    rel = put(data, f"{base}/Made Up Game (Japan).zip", {"Made Up Game (Japan).rvz": b"RVZ\x01"})
+    out = p.run(7, rel, "wii")
+    assert out.state == "done" and (lib / "wii" / "Made Up Game (Japan).rvz").read_bytes() == b"RVZ\x01"
